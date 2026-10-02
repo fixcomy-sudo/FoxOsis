@@ -66,5 +66,16 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>FoxOsis использует камеру для видеозвонков</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>FoxOsis использует микрофон для голосовых и видеозвонков</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>FoxOsis ищет собеседников в вашей локальной сети</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

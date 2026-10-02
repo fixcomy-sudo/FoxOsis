@@ -1,0 +1,57 @@
+name: iOS .ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app.js'
+      - 'index.html'
+      - 'www/**'
+      - 'ios/**'
+      - 'package.json'
+      - '.github/workflows/ios.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Веб-ассеты в iOS-проект
+        run: npx cap sync ios
+
+      - name: Сборка App.app (без подписи)
+        run: |
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Упаковка .ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qr FoxOsis.ipa Payload
+          ls -la FoxOsis.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FoxOsis-ipa
+          path: FoxOsis.ipa
+          if-no-files-found: error
