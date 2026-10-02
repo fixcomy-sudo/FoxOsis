@@ -1417,6 +1417,31 @@
     })();
   </script>
 
+  <!-- Полифилл Promise.withResolvers (ES2024): в старом Android WebView и
+       iOS < 17.4 его нет, а libp2p (бандл) его использует — без полифилла
+       boot падает с "FATAL: Promise.withResolvers is not a function".
+       Классический скрипт выполняется ДО модуля — гарантия порядка. -->
+  <script>
+    if (typeof Promise.withResolvers !== 'function') {
+      Promise.withResolvers = function () {
+        let resolve, reject
+        const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+        return { promise, resolve, reject }
+      }
+    }
+    if (!Array.prototype.findLast) {
+      Array.prototype.findLast = function (fn, thisArg) {
+        for (let i = this.length - 1; i >= 0; i--) if (fn.call(thisArg, this[i], i, this)) return this[i]
+      }
+    }
+    if (!Array.prototype.findLastIndex) {
+      Array.prototype.findLastIndex = function (fn, thisArg) {
+        for (let i = this.length - 1; i >= 0; i--) if (fn.call(thisArg, this[i], i, this)) return i
+        return -1
+      }
+    }
+  </script>
+
   <!-- Точка входа приложения -->
   <script type="module" src="./app.bundle.js"></script>
 </body>
