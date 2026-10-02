@@ -31,27 +31,42 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon'
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp'
 }
 
 /* --------------------------------------------------------------------------
- * HTTP: статические файлы
+ * HTTP: статические файлы — из памяти (opts.files, exe) или с диска (dev)
  * ----------------------------------------------------------------------- */
-const server = http.createServer((req, res) => {
-  let p = decodeURIComponent(req.url.split('?')[0])
-  if (p === '/') p = '/index.html'
-  const f = path.join(ROOT, p)
-  if (!f.startsWith(ROOT)) { res.writeHead(403); res.end('forbidden'); return }
-  fs.readFile(f, (e, d) => {
-    if (e) { res.writeHead(404); res.end('not found'); return }
-    res.writeHead(200, {
-      'Content-Type': TYPES[path.extname(f).toLowerCase()] || 'application/octet-stream',
-      // без кэша: телефон не должен подхватывать устаревший app.js
-      'Cache-Control': 'no-store'
+function makeHandler (opts) {
+  const files = opts.files || null            // { '/index.html': Buffer, … }
+  const root = opts.root || ROOT
+  return (req, res) => {
+    let p = decodeURIComponent(req.url.split('?')[0])
+    if (p === '/') p = '/index.html'
+    const type = TYPES[path.extname(p).toLowerCase()] || 'application/octet-stream'
+    const send = (buf) => {
+      res.writeHead(200, {
+        'Content-Type': type,
+        // без кэша: телефон не должен подхватывать устаревший app.js
+        'Cache-Control': 'no-store'
+      })
+      res.end(buf)
+    }
+    if (files && Object.prototype.hasOwnProperty.call(files, p)) {
+      send(files[p])
+      return
+    }
+    const f = path.join(root, p)
+    if (!f.startsWith(root)) { res.writeHead(403); res.end('forbidden'); return }
+    fs.readFile(f, (e, d) => {
+      if (e) { res.writeHead(404); res.end('not found'); return }
+      send(d)
     })
-    res.end(d)
-  })
-})
+  }
+}
 
 /* --------------------------------------------------------------------------
  * WebSocket БЕЗ внешних зависимостей (RFC 6455: handshake + кадры)
@@ -207,36 +222,48 @@ function drain (conn) {
   }
 }
 
-server.on('upgrade', (req, socket) => {
-  const key = req.headers['sec-websocket-key']
-  const url = (req.url || '').split('?')[0]
-  if (!key || url !== '/ws') { socket.destroy(); return }
+/** Создать HTTP+WS сервер: opts.files — карта статики в памяти (для exe) */
+function createServer (opts = {}) {
+  const server = http.createServer(makeHandler(opts))
 
-  const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64')
-  socket.write(
-    'HTTP/1.1 101 Switching Protocols\r\n' +
-    'Upgrade: websocket\r\n' +
-    'Connection: Upgrade\r\n' +
-    `Sec-WebSocket-Accept: ${accept}\r\n` +
-    '\r\n'
-  )
-  socket.setNoDelay(true)
+  server.on('upgrade', (req, socket) => {
+    const key = req.headers['sec-websocket-key']
+    const url = (req.url || '').split('?')[0]
+    if (!key || url !== '/ws') { socket.destroy(); return }
 
-  const conn = { socket, peerId: null, buf: Buffer.alloc(0), fragments: [] }
-  socket.on('data', (chunk) => {
-    conn.buf = Buffer.concat([conn.buf, chunk])
-    drain(conn)
+    const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64')
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${accept}\r\n` +
+      '\r\n'
+    )
+    socket.setNoDelay(true)
+
+    const conn = { socket, peerId: null, buf: Buffer.alloc(0), fragments: [] }
+    socket.on('data', (chunk) => {
+      conn.buf = Buffer.concat([conn.buf, chunk])
+      drain(conn)
+    })
+    socket.on('error', () => detachSocket(conn))
+    socket.on('close', () => detachSocket(conn))
   })
-  socket.on('error', () => detachSocket(conn))
-  socket.on('close', () => detachSocket(conn))
-})
+
+  return server
+}
 
 // пустые ping-кадры: чистим «спящие» соединения (телефон в сне) каждые 30 с
 setInterval(() => {
   for (const rec of peers.values()) safeWrite(rec.socket, frame(Buffer.alloc(0), 0x9))
 }, 30000)
 
-server.listen(PORT, () => {
-  console.log(`FoxOsis: http://localhost:${PORT}  (для телефона — http://<IP-ПК>:${PORT})`)
-  console.log('LAN-ретранслятор сигналинга: ws://…/ws')
-})
+/* CLI: node server.js */
+if (require.main === module) {
+  createServer().listen(PORT, () => {
+    console.log(`FoxOsis: http://localhost:${PORT}  (для телефона — http://<IP-ПК>:${PORT})`)
+    console.log('LAN-ретранслятор сигналинга: ws://…/ws')
+  })
+}
+
+module.exports = { createServer, PORT }

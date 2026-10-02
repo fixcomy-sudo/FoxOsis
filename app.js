@@ -96,7 +96,8 @@ const INST_ID = (() => {
   const isNative = !!(w && (
     w.androidBridge ||                                   // Android: JavascriptInterface
     (w.webkit && w.webkit.messageHandlers && w.webkit.messageHandlers.capacitor) || // iOS WKWebView
-    (w.Capacitor && typeof w.Capacitor.isNativePlatform === 'function' && w.Capacitor.isNativePlatform())
+    (w.Capacitor && typeof w.Capacitor.isNativePlatform === 'function' && w.Capacitor.isNativePlatform()) ||
+    (typeof navigator !== 'undefined' && /\bElectron\//.test(navigator.userAgent || '')) // десктоп (exe)
   ))
   if (isNative) {
     try {
@@ -135,7 +136,8 @@ const instKey = (base) => `foxosis/inst/${INST_ID}/${base}`
 ;(() => {
   const isNative = typeof window !== 'undefined' && !!(window.androidBridge ||
     (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.capacitor) ||
-    (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()))
+    (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()) ||
+    (typeof navigator !== 'undefined' && /\bElectron\//.test(navigator.userAgent || '')))
   if (!isNative) return
   const prefix = 'foxosis/inst/'
   try {
@@ -261,11 +263,19 @@ const CFG = {
   NOSTR_RELAYS: [
     'wss://relay.primal.net',
     'wss://nos.lol',
-    'wss://nostr.bitcoiner.social'
+    'wss://nostr.bitcoiner.social',
+    // запасные — пока один жив, вход/поиск работают
+    'wss://relay.damus.io',
+    'wss://nostr.mom'
   ],
   NOSTR_ROOT: 'foxosis/v1',    // корень тегов приложения
   NOSTR_KIND: 21337,           // эфемерный kind (20000–29999) — без хранения
   UNAME_KIND: 30078,           // адресный (d-тег) — релеи ХРАНЯТ: заявка @юзернейма
+  // «Облако» аккаунта (Vault): шифрованное хранилище в тех же релеях
+  VAULT_CHUNK: 12000,          // размер куска (символов base64) — влезает в
+                               // лимиты публичных релеев (~16 КБ на событие)
+  VAULT_MAX_CHUNKS: 8,         // потолок кусков (72 КБ сжатых данных)
+  VAULT_SYNC_MS: 60000,        // фоновая синхронизация: не чаще раза в минуту
   NOSTR_BACKOFF_MS: [1000, 2000, 5000, 15000, 30000], // паузы между попытками
 
   // Дополнительные СВОИ ретрансляторы server.js в интернете (VPS) — полные
@@ -563,6 +573,9 @@ const Store = {
     try {
       localStorage.setItem(CFG.STORE_KEY, JSON.stringify(this.data))
       this.lastSaveOk = true
+      // данные изменились — «облако» (Vault) устарело, синхронизируем позже
+      if (this.data.profile && this.data.profile.authed &&
+          typeof Vault !== 'undefined' && Vault) Vault.dirty = true
       return true
     } catch (e) {
       this.lastSaveOk = false
@@ -1351,6 +1364,310 @@ function sha256js (msg) {
   return Array.from(H).map(x => x.toString(16).padStart(8, '0')).join('')
 }
 
+/* ==========================================================================
+ * 5.5 VAULT — «облако» аккаунта как в Telegram.
+ *    Профиль, ключи идентичности (libp2p + Nostr), контакты и история
+ *    ШИФРУЮТСЯ паролем (AES-GCM, ключ из PBKDF2-SHA256, 150k итераций)
+ *    и лежат в публичных релеях (kind 30078, d='vault/<ник>', в кусках).
+ *    Вход с тем же @ником+паролем с ЛЮБОГО устройства восстанавливает всё,
+ *    включая тот же Peer ID — собеседники вас узнают.
+ *    Релей видит только шифротекст: пароль известен только вам.
+ *    Требует secure context (https / localhost / приложение); на «голом»
+ *    http по LAN crypto.subtle недоступен — вход работает, без облака.
+ * ========================================================================== */
+const Vault = {
+  dirty: false,       // данные изменились после последней публикации
+  _pending: null,     // [{event}] — не отправилось (нет живых сокетов)
+  _lastPub: 0,
+
+  available () { return !!(globalThis.crypto && crypto.subtle) },
+
+  /** AES-ключ из пароля (extractable — чтобы сохранить для фоновой синхронизации) */
+  async _key (password, username) {
+    const base = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: new TextEncoder().encode('foxosis-vault:' + username), iterations: 150000, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+  },
+
+  /** Производный ключ → localStorage (сам пароль НЕ сохраняем).
+   *  Нужен для фоновой синхронизации после перезагрузки страницы. */
+  async adoptKey (password) {
+    const key = await this._key(password, Store.data.profile.username || '')
+    try {
+      const raw = await crypto.subtle.exportKey('raw', key)
+      localStorage.setItem(instKey('vaultkey/v1'), bytesToB64(raw))
+    } catch { /* приватный режим — просто без фоновой синхронизации */ }
+    return key
+  },
+
+  /** Прочитать сохранённый производный ключ (для publish без пароля) */
+  async _loadKey () {
+    try {
+      const b64 = localStorage.getItem(instKey('vaultkey/v1'))
+      if (!b64) return null
+      return await crypto.subtle.importKey('raw', b64ToBytes(b64), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+    } catch { return null }
+  },
+
+  /** Собрать аккаунт в JSON: профиль, оба ключа, чаты (с лимитом истории) */
+  _collect (maxMsgs = 40) {
+    const chats = {}
+    for (const [id, c] of Object.entries((Store.data.chats) || {})) {
+      chats[id] = {
+        name: c.name || '', username: c.username || '', ava: c.ava || '',
+        unread: c.unread || 0, ts: c.ts || 0,
+        messages: (c.messages || []).slice(-maxMsgs)
+      }
+    }
+    let p2pKey = null
+    let nostrKey = null
+    try { p2pKey = localStorage.getItem(CFG.KEY_STORAGE) } catch {}
+    try { nostrKey = localStorage.getItem(instKey('nostr/v1')) } catch {}
+    return {
+      v: 1, ts: Date.now(),
+      profile: {
+        name: Store.data.profile.name || '',
+        username: Store.data.profile.username || '',
+        passHash: Store.data.profile.passHash || '',
+        ava: Store.data.profile.ava || ''
+      },
+      p2pKey, nostrKey, chats
+    }
+  },
+
+  /** JSON → deflate → AES-GCM → base64-строка (её режем на куски) */
+  async _packWithKey (key, maxMsgs) {
+    const json = JSON.stringify(this._collect(maxMsgs))
+    let comp = await deflateText(json)
+    if (comp == null) comp = bytesToB64(new TextEncoder().encode(json)) // сжать не удалось/не выгодно
+    const plain = b64ToBytes(comp)
+    const iv = crypto.getRandomValues(new Uint8Array(12))
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain))
+    const blob = new Uint8Array(12 + ct.length)
+    blob.set(iv, 0)
+    blob.set(ct, 12)
+    return bytesToB64(blob)
+  },
+
+  /** Пакет с авто-подгонкой: урезаем историю, пока не влезет в лимит */
+  async _pack (key) {
+    for (const n of [40, 20, 10, 5, 0]) {
+      const b64 = await this._packWithKey(key, n)
+      if (Math.ceil(b64.length / CFG.VAULT_CHUNK) <= CFG.VAULT_MAX_CHUNKS) return b64
+    }
+    return null
+  },
+
+  /** Распаковать: base64 → AES-GCM → inflate → JSON. null = не открылось */
+  async _unpack (b64blob, key) {
+    try {
+      const blob = b64ToBytes(b64blob)
+      const pt = new Uint8Array(await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: blob.slice(0, 12) }, key, blob.slice(12)))
+      let json = await inflateText(bytesToB64(pt))
+      if (json == null) json = new TextDecoder().decode(pt)
+      return JSON.parse(json)
+    } catch { return null }
+  },
+
+  /** Опубликовать хранилище в релеи (key — из пароля или сохранённый) */
+  async publish (key) {
+    if (!this.available()) return false
+    key = key || await this._loadKey()
+    if (!key) return false
+    const uname = Store.data.profile.username
+    if (!uname) return false
+    const b64 = await this._pack(key)
+    if (!b64) { log('vault: аккаунт не влез в лимит релея — не синхронизирован', 'warn'); return false }
+    const n = Math.ceil(b64.length / CFG.VAULT_CHUNK)
+    try {
+      const events = []
+      events.push(NostrRendezvous._signAny(CFG.UNAME_KIND, [['d', 'vault/' + uname]],
+        JSON.stringify({ n, ts: Date.now(), acc: Store.data.profile.passHash || '' })))
+      for (let i = 0; i < n; i++) {
+        const part = b64.slice(i * CFG.VAULT_CHUNK, (i + 1) * CFG.VAULT_CHUNK)
+        events.push(NostrRendezvous._signAny(CFG.UNAME_KIND, [['d', `vault/${uname}/${i}`]], part))
+      }
+      this._pending = events
+    } catch (e) {
+      log('vault: не удалось подписать: ' + e.message, 'warn')
+      return false
+    }
+    if (this.flush()) {
+      log(`аккаунт синхронизирован с «облаком» (${n} бл.) — вход с другого устройства восстановит профиль, ключи и чаты`, 'ok')
+      return true
+    }
+    return false // сокетов нет — уйдёт после первого EOSE (Vault._pending)
+  },
+
+  /** Отправить накопленные события на все живые сокеты */
+  _send () {
+    if (!this._pending) return false
+    const now = Date.now()
+    const socks = NostrRendezvous.relays.filter((r) => r.ws && r.ws.readyState === 1 && r.mutedUntil < now)
+    if (!socks.length) return false
+    for (const ev of this._pending) {
+      const frame = JSON.stringify(['EVENT', ev])
+      for (const r of socks) { try { r.ws.send(frame) } catch {} }
+    }
+    return true
+  },
+
+  /** Удачно отправили — сбросить «грязь» и хвост. Вызывается и из EOSE-хука. */
+  flush () {
+    if (!this._send()) return false
+    this._pending = null
+    this.dirty = false
+    this._lastPub = Date.now()
+    return true
+  },
+
+  /** Забрать хранилище из релеев и расшифровать ПАРОЛЕМ.
+   *  acc — hash(пароля): мета-событие принимается ТОЛЬКО с совпавшим acc
+   *  (иначе любой мог бы подложить чужой «vault» под наш ник), куски —
+   *  только от того же pubkey, что и метка.
+   *  → {data} | {found: true} (есть, но не открылось) | null (нет данных) */
+  async fetch (username, password, acc) {
+    if (!this.available()) return null
+    const socks = NostrRendezvous.relays.filter((r) => r.ws && r.ws.readyState === 1)
+    if (!NostrRendezvous.key || !socks.length) return null
+    let key
+    try { key = await this._key(password, username) } catch { return null }
+    const sub = 'foxosis-vault-' + rndId()
+    const ds = ['vault/' + username]
+    for (let i = 0; i < CFG.VAULT_MAX_CHUNKS; i++) ds.push(`vault/${username}/${i}`)
+    const filter = { kinds: [CFG.UNAME_KIND], '#d': ds, limit: 24 }
+    const metas = new Map()   // pubkey -> {n, ts, acc} (самая свежая)
+    const chunks = new Map()  // pubkey -> Map<d, part>
+    return new Promise((resolve) => {
+      let done = false
+      let eoses = 0
+      const handlers = new Map()
+      const cleanup = () => {
+        clearTimeout(timer)
+        for (const r of socks) {
+          const h = handlers.get(r)
+          if (h) { try { r.ws.removeEventListener('message', h) } catch {} }
+          try { if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify(['CLOSE', sub])) } catch {}
+        }
+      }
+      // кандидаты: метки с совпавшим acc, свежие сверху
+      const cands = () => [...metas.entries()]
+        .filter(([, m]) => !acc || m.acc === acc)
+        .sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))
+      const assemble = (pub, meta) => {
+        const byPub = chunks.get(pub)
+        if (!byPub) return null
+        let blob = ''
+        for (let i = 0; i < meta.n; i++) {
+          const p = byPub.get('vault/' + username + '/' + i)
+          if (p == null) return null
+          blob += p
+        }
+        return blob
+      }
+      // финальный перебор — после EOSE всех релеев или по таймеру
+      const settle = async () => {
+        if (done) return
+        done = true
+        cleanup()
+        let found = false
+        for (const [pub, meta] of cands()) {
+          const blob = assemble(pub, meta)
+          if (blob == null) continue
+          const data = await this._unpack(blob, key)
+          if (data) return resolve({ data })
+          found = true // нашли, но пароль не тот/данные повреждены
+        }
+        resolve(found ? { found: true } : null)
+      }
+      // событие только что пришло — если куски уже полны, не ждём EOSE
+      const maybe = async () => {
+        if (done) return
+        for (const [pub, meta] of cands()) {
+          const blob = assemble(pub, meta)
+          if (blob == null) continue
+          const data = await this._unpack(blob, key)
+          if (!data) continue
+          if (done) return
+          done = true
+          cleanup()
+          return resolve({ data })
+        }
+      }
+      const timer = setTimeout(() => { settle() }, 4500)
+      for (const r of socks) {
+        const h = (ev) => {
+          let f
+          try { f = JSON.parse(ev.data) } catch { return }
+          if (!Array.isArray(f) || f[1] !== sub) return
+          if (f[0] === 'EVENT') {
+            const e = f[2]
+            if (!e || typeof e !== 'object' || !Array.isArray(e.tags) || !e.pubkey) return
+            let d = null
+            for (const t of e.tags) { if (Array.isArray(t) && t[0] === 'd') { d = t[1]; break } }
+            if (typeof d !== 'string' || !d.startsWith('vault/' + username)) return
+            if (d === 'vault/' + username) {
+              try {
+                const body = JSON.parse(e.content)
+                const prev = metas.get(e.pubkey)
+                if (!prev || (body.ts || 0) > (prev.ts || 0)) metas.set(e.pubkey, body)
+              } catch {}
+            } else {
+              let byPub = chunks.get(e.pubkey)
+              if (!byPub) { byPub = new Map(); chunks.set(e.pubkey, byPub) }
+              byPub.set(d, e.content)
+            }
+            maybe().catch(() => {})   // куски могли уже собраться — не ждём EOSE
+          } else if (f[0] === 'EOSE') {
+            eoses++
+            if (eoses >= socks.length) settle()
+          }
+        }
+        handlers.set(r, h)
+        try {
+          r.ws.addEventListener('message', h)
+          r.ws.send(JSON.stringify(['REQ', sub, filter]))
+        } catch { /* сокет умер — таймер завершит */ }
+      }
+    })
+  },
+
+  /** Восстановить локальное состояние из data + сохранить производный ключ.
+   *  ВАЖНО: после apply() нужен reload — иначе уже запущенный libp2p-узел
+   *  останется со старым Peer ID. */
+  apply (data) {
+    try {
+      if (data.p2pKey) localStorage.setItem(CFG.KEY_STORAGE, data.p2pKey)
+      if (data.nostrKey) localStorage.setItem(instKey('nostr/v1'), data.nostrKey)
+    } catch (e) {
+      log('vault: ключи не записались: ' + e.message, 'err')
+      return false
+    }
+    const p = Store.data.profile
+    if (data.profile) {
+      p.name = data.profile.name || p.name
+      p.username = data.profile.username || p.username
+      p.passHash = data.profile.passHash || p.passHash
+      p.ava = data.profile.ava || p.ava
+    }
+    p.authed = true
+    if (data.chats) Store.data.chats = data.chats
+    Store.save()
+    Vault.dirty = false   // только что выложили — грузим как есть
+    return true
+  },
+
+  /** Фоновая синхронизация: раз в VAULT_SYNC_MS, если данные «грязные» */
+  syncTick () {
+    if (!this.dirty || !Store.data.profile.authed || !this.available()) return
+    if (this._pending || Date.now() - this._lastPub < CFG.VAULT_SYNC_MS) return
+    this.publish().catch((e) => log('vault: ' + e.message, 'warn'))
+  }
+}
+
 const Auth = {
   /** SHA-256 пароля в hex (локальное «хэширование», не для сети) */
   async hash (password) {
@@ -1419,6 +1736,19 @@ const Auth = {
     this._err(null, 'login')
   },
 
+  /** Дождаться подключения хотя бы одного релея (иначе проверка ника
+   *  вернёт «свободно» без ответа — вход/регистрация пойдут вслепую). */
+  _waitRelays (ms = 5000) {
+    return new Promise((resolve) => {
+      const t0 = Date.now()
+      const tick = () => {
+        if (NostrRendezvous.relays.some((r) => r.ws && r.ws.readyState === 1) || Date.now() - t0 >= ms) return resolve()
+        setTimeout(tick, 100)
+      }
+      tick()
+    })
+  },
+
   /** Регистрация: имя + @юзернейм + пароль */
   async register () {
     const e = this.els
@@ -1443,19 +1773,42 @@ const Auth = {
     const btnText = btn.textContent
     btn.disabled = true
     btn.textContent = 'Проверяем ник…'
+    await this._waitRelays()
     let chk = { status: 'free', name: '' }
     try { chk = await NostrRendezvous.checkUname(username, passHash) } catch {}
+    if (chk.status === 'free' && Vault.available()) {
+      // страховка: релей мог не ответить вовремя (checkUname → «свободно»).
+      // Если облако с ЭТИМ паролем уже существует — это вход, не регистрация:
+      // иначе новое устройство затёрло бы ключи и чаты в облаке.
+      btn.textContent = 'Проверяем «облако»…'
+      let v = null
+      try { v = await Vault.fetch(username, pass, passHash) } catch {}
+      if (v && v.data) chk = { status: 'own', name: v.data.profile && v.data.profile.name || '' }
+    }
     btn.disabled = false
     btn.textContent = btnText
     if (chk.status === 'taken') {
       log(`@${username} занят другим пользователем — регистрация отклонена`, 'warn')
       return this._err('@' + username + ' уже занят другим пользователем. Если это ваш ник — войдите тем же паролем во вкладке «Вход».', 'reg')
     }
+    if (chk.status === 'own') {
+      // учётка УЖЕ есть (тот же пароль) — регистрация стёрла бы «облако».
+      // Правильный путь: вход восстановит профиль, ключи и чаты.
+      log(`@${username} уже зарегистрирован вами — вход вместо повторной регистрации`, 'sys')
+      return this._err('Аккаунт @' + username + ' уже существует. Войдите тем же паролем во вкладке «Вход» — он восстановится со всеми чатами.', 'reg')
+    }
 
     Store.setProfile({ name, username, passHash, authed: true })
     e.regPass.value = ''
     // заявка в релеи: другие устройства увидят, что ник занят
     try { NostrRendezvous.publishUname(username, name, passHash) } catch {}
+    // «облако»: выкладываем аккаунт целиком — вход с другого устройства
+    // восстановит профиль, ключи (тот же Peer ID) и историю чатов
+    if (Vault.available()) {
+      try { await Vault.publish(await Vault.adoptKey(pass)) } catch (e2) { log('vault: ' + e2.message, 'warn') }
+    } else {
+      log('vault: недоступен (нужен https/localhost) — вход с других устройств восстановит только профиль', 'warn')
+    }
     if (!Store.lastSaveOk) {
       // честно предупреждаем: сессия продолжится, но при перезагрузке
       // аккаунт и чаты не вернутся — включите обычный браузер, не приватный
@@ -1493,22 +1846,57 @@ const Auth = {
       const btnText = btn.textContent
       btn.disabled = true
       btn.textContent = 'Ищем аккаунт…'
+      await this._waitRelays()
       let chk = { status: 'free', name: '' }
-      try { chk = await NostrRendezvous.checkUname(username, passHash) } catch {}
-      btn.disabled = false
-      btn.textContent = btnText
-      if (chk.status !== 'own') {
+      // релей мог молчать/переподключаться — «свободно» без ответа не рискуем:
+      // при реальном аккаунте заявка находится с первого-второго запроса
+      for (let i = 0; i < 3; i++) {
+        try { chk = await NostrRendezvous.checkUname(username, passHash) } catch {}
+        if (chk.status !== 'free') break
+        await new Promise((resolve) => setTimeout(resolve, 700))
+      }
+      if (chk.status === 'own') {
+        // своё имя найдено — тянем «облако» (профиль, ключи, чаты)
+        btn.textContent = 'Восстанавливаем аккаунт…'
+        let v = null
+        for (let i = 0; i < 3 && !v; i++) {
+          try { v = await Vault.fetch(username, pass, passHash) } catch {}
+          if (!v) await new Promise((resolve) => setTimeout(resolve, 700))
+        }
+        btn.disabled = false
+        btn.textContent = btnText
+        if (v && v.data && Vault.apply(v.data)) {
+          try { localStorage.setItem(instKey('vaultkey/v1'), bytesToB64(await crypto.subtle.exportKey('raw', await Vault._key(pass, username)))) } catch {}
+          log('аккаунт ВОССТАНОВЛЕН из «облака»: профиль, ключи, чаты — перезагрузка…', 'ok')
+          UI.toast('Аккаунт восстановлен — загружаю чаты…')
+          setTimeout(() => location.reload(), 600)  // перезапуск узла с тем же Peer ID
+          return
+        }
+        if (v && v.found) {
+          log('vault: хранилище найдено, но не открылось (повреждено) — базовое восстановление', 'warn')
+        }
+        // облака нет (старый аккаунт / офлайн-релей) — прежнее поведение
+        Store.setProfile({ name: chk.name || username, username, passHash })
+        log(`аккаунт восстановлен из сети: @${username}` + (v ? '' : ' (без облачных данных)'), 'ok')
+      } else {
+        btn.disabled = false
+        btn.textContent = btnText
+        if (chk.status !== 'free') {
+          return this._err('Аккаунт не найден: на этом устройстве записи нет, а в сети учётку с таким @ником и паролем не нашли. Зарегистрируйтесь — ник освободится, если пароль тот же.', 'login')
+        }
         return this._err('Аккаунт не найден: на этом устройстве записи нет, а в сети учётку с таким @ником и паролем не нашли. Зарегистрируйтесь — ник освободится, если пароль тот же.', 'login')
       }
-      // восстановление: та же учётка найдена в сети — пересоздаём локально
-      Store.setProfile({ name: chk.name || username, username, passHash })
-      log(`аккаунт восстановлен из сети: @${username}`, 'ok')
     }
 
     Store.setProfile({ authed: true })
     e.logPass.value = ''
     // освежаем заявку ника (для аккаунтов, зарегистрированных до её появления)
     try { NostrRendezvous.publishUname(username, Store.data.profile.name, passHash) } catch {}
+    // локальный вход — это тоже момент синхронизации: выкладываем своё
+    // состояние в «облако» (кто-то может войти с телефона этим же паролем)
+    if (Vault.available()) {
+      try { await Vault.publish(await Vault.adoptKey(pass)) } catch (e2) { log('vault: ' + e2.message, 'warn') }
+    }
     if (!Store.lastSaveOk) UI.toast('Внимание: вход не сохраняется этим браузером')
     log(`вход: @${username}`, Store.lastSaveOk ? 'ok' : 'err')
     this.enter()
@@ -1531,6 +1919,8 @@ const Auth = {
   /** Выход из аккаунта (профиль остаётся — можно войти снова) */
   logout () {
     Store.setProfile({ authed: false })
+    try { localStorage.removeItem(instKey('vaultkey/v1')) } catch {} // без пароля фоновая синхронизация не нужна
+    Vault.dirty = false
     document.body.classList.remove('authorized')
     const e = this.els
     e.auth.classList.remove('shown')
@@ -2232,6 +2622,7 @@ const NostrRendezvous = {
         try { Rendezvous._tick() } catch {}      // свежий hello сразу в эфир
         try { Rendezvous._republish() } catch {} // незавершённый offer/answer — повтором
         this._flushClaim()                       // заявка юзернейма — после обвала сети
+        try { Vault.flush() } catch {}           // «облако» аккаунта — тоже
       }
       return
     }
@@ -2398,7 +2789,7 @@ const NostrRendezvous = {
         }
         resolve({ status, name: ownName })
       }
-      const timer = setTimeout(() => finish(ownName ? 'own' : 'free'), 2500)
+      const timer = setTimeout(() => finish(ownName ? 'own' : 'free'), 3500)
       for (const r of socks) {
         const h = (ev) => {
           let f
@@ -2409,8 +2800,13 @@ const NostrRendezvous = {
             if (!e || typeof e !== 'object') return
             let body = null
             try { body = JSON.parse(e.content) } catch {}
-            const isOwn = e.pubkey === this.key.pub || !!(body && acc && body.acc === acc)
-            if (isOwn) {
+            // точное совпадение отпечатка пароля — ответ определёнён,
+            // не ждём EOSE от остальных релеев (те могут тормозить/валиться)
+            if (body && acc && body.acc === acc) {
+              if (typeof body.name === 'string' && body.name) ownName = ownName || body.name
+              return finish('own')
+            }
+            if (e.pubkey === this.key.pub) {
               // своя учётка — запомним имя профиля из заявки (для восстановления)
               if (body && typeof body.name === 'string' && body.name) ownName = ownName || body.name
               return
@@ -3680,6 +4076,7 @@ async function boot () {
   window.addEventListener('online', kickReconnect)
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) kickReconnect()
+    else if (typeof Vault !== 'undefined' && Vault.dirty) Vault.syncTick() // уходя — выкладываем «облако»
   })
 
   // 6) PubSub-присутствие
@@ -3691,6 +4088,7 @@ async function boot () {
     UI.updateChatStatus()
     UI.updateNetStatus()
     if (!UI.els.sideNew.hidden) UI.renderOnlineList()
+    Vault.syncTick()                            // «облако»: синхронизация раз в минуту
   }, 2000)
 
   // 8) восстановить последний открытый чат
@@ -3722,6 +4120,7 @@ window.Fox = {
   declineCall: () => Call.decline(),
   rename: (n) => { Store.setProfileName(n); Presence.announce() },
   logout: () => Auth.logout(),
+  Vault,
   UI, Store, Rendezvous, LanRendezvous, NostrRendezvous, Reconnector, Call, Chat, Signal, Presence, Auth, App
 }
 

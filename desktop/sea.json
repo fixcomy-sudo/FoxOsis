@@ -1,0 +1,7 @@
+{
+  "main": "desktop/out/main.cjs",
+  "output": "desktop/out/foxosis.blob",
+  "disableExperimentalSEAWarning": true,
+  "useCodeCache": false,
+  "useSnapshot": false
+}
