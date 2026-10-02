@@ -88,6 +88,24 @@ const INST_ID = (() => {
   const toSession = (id) => { try { sessionStorage.setItem('foxosis.inst', id); return true } catch { return false } }
   const fromSession = () => { try { return sessionStorage.getItem('foxosis.inst') } catch { return null } }
 
+  // НАТИВНОЕ ПРИЛОЖЕНИЕ (Capacitor: APK/IPA): WebView при перезапуске стирает
+  // sessionStorage и window.name — «вкладочный» id менялся бы каждый раз:
+  // аккаунт и чаты «вылетали», а пир выглядел новым устройством. В приложении
+  // вкладок нет — id храним в localStorage (переживает перезапуск).
+  const w = typeof window !== 'undefined' ? window : null
+  const isNative = !!(w && (
+    w.androidBridge ||                                   // Android: JavascriptInterface
+    (w.webkit && w.webkit.messageHandlers && w.webkit.messageHandlers.capacitor) || // iOS WKWebView
+    (w.Capacitor && typeof w.Capacitor.isNativePlatform === 'function' && w.Capacitor.isNativePlatform())
+  ))
+  if (isNative) {
+    try {
+      let id = localStorage.getItem('foxosis/inst-id')
+      if (!id) { id = gen(); localStorage.setItem('foxosis/inst-id', id) }
+      return id
+    } catch { return 'default' }
+  }
+
   try {
     let id = fromSession() || fromName()
     if (id) {
@@ -109,6 +127,58 @@ const INST_ID = (() => {
 
 /** Ключ localStorage с учётом экземпляра вкладки */
 const instKey = (base) => `foxosis/inst/${INST_ID}/${base}`
+
+// Нативное приложение: раз INST_ID раньше менялся при каждом перезапуске,
+// старые хранилища лежат под ключами foxosis/inst/<случайный>/... — переносим
+// самое свежее «живое» аккаунт-хранилище (и ключи) под стабильный id,
+// иначе после обновления приложение снова покажет пустой аккаунт.
+;(() => {
+  const isNative = typeof window !== 'undefined' && !!(window.androidBridge ||
+    (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.capacitor) ||
+    (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform()))
+  if (!isNative) return
+  const prefix = 'foxosis/inst/'
+  try {
+    // 1) хранилище мессенджера (профиль + чаты): берём САМОЕ НОВОЕ с авторизацией
+    const target = instKey('store/v1')
+    if (!localStorage.getItem(target)) {
+      const cands = []
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)
+        if (k && k.startsWith(prefix) && k.endsWith('/store/v1') && k !== target) cands.push(k)
+      }
+      for (let pass = 0; pass < 2 && !localStorage.getItem(target); pass++) {
+        // сначала ищем с авторизованным профилем (с конца — конец = свежее),
+        // затем просто самое свежее непустое хранилище
+        for (let i = cands.length - 1; i >= 0; i--) {
+          const raw = localStorage.getItem(cands[i])
+          if (!raw) continue
+          let data = null
+          try { data = JSON.parse(raw) } catch { continue }
+          if (!data) continue
+          const authed = data.profile && data.profile.authed
+          const hasChats = data.chats && Object.keys(data.chats).length
+          if (pass === 0 ? authed : (authed || hasChats)) {
+            localStorage.setItem(target, raw)
+            break
+          }
+        }
+      }
+    }
+    // 2) ключи libp2p (Ed25519) и Nostr — переносим самое свежее значение
+    for (const base of ['key/v1', 'nostr/v1']) {
+      const t = instKey(base)
+      if (localStorage.getItem(t)) continue
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i)
+        if (k && k.startsWith(prefix) && k.endsWith('/' + base) && k !== t) {
+          const v = localStorage.getItem(k)
+          if (v) { localStorage.setItem(t, v); break }
+        }
+      }
+    }
+  } catch { /* миграция не обязательна — без неё просто пусто */ }
+})()
 
 /** Конфигурация приложения — все "магические числа" собраны в одном месте */
 const CFG = {
@@ -1340,13 +1410,13 @@ const Auth = {
     const btnText = btn.textContent
     btn.disabled = true
     btn.textContent = 'Проверяем ник…'
-    let taken = false
-    try { taken = await NostrRendezvous.checkUname(username, passHash) === 'taken' } catch {}
+    let chk = { status: 'free', name: '' }
+    try { chk = await NostrRendezvous.checkUname(username, passHash) } catch {}
     btn.disabled = false
     btn.textContent = btnText
-    if (taken) {
-      log(`@${username} уже занят другим пользователем — регистрация отклонена`, 'warn')
-      return this._err('@' + username + ' уже занят — придумайте другой юзернейм.', 'reg')
+    if (chk.status === 'taken') {
+      log(`@${username} занят другим пользователем — регистрация отклонена`, 'warn')
+      return this._err('@' + username + ' уже занят другим пользователем. Если это ваш ник — войдите тем же паролем во вкладке «Вход».', 'reg')
     }
 
     Store.setProfile({ name, username, passHash, authed: true })
@@ -1363,7 +1433,9 @@ const Auth = {
     this.enter()
   },
 
-  /** Вход: юзернейм + пароль сверяются с локальной записью */
+  /** Вход: юзернейм + пароль сверяются с локальной записью; если локальной
+   *  записи нет (переустановка/новое устройство) — ищем СВОЮ учётку по
+   *  заявке ника в публичных релеях: пароль и есть ключ восстановления. */
   async login () {
     const e = this.els
     this._err(null, 'login')
@@ -1371,14 +1443,39 @@ const Auth = {
     const pass = e.logPass.value || ''
     const p = Store.data.profile
 
-    if (!p.username || !p.passHash) return this._err('Аккаунт не найден — зарегистрируйтесь.', 'login')
-    if (username !== p.username) return this._err('Неверный юзернейм.', 'login')
-    if ((await this.hash(pass)) !== p.passHash) return this._err('Неверный пароль.', 'login')
+    if (!this.validUsername(username)) {
+      return this._err('Юзернейм: 3–20 символов — латиница, цифры и «_».', 'login')
+    }
+    const passHash = await this.hash(pass)
+
+    if (p.username && p.passHash) {
+      // локальный аккаунт есть — сверяем как раньше
+      if (username !== p.username) {
+        return this._err('Неверный юзернейм (на этом устройстве сохранён @' + p.username + ').', 'login')
+      }
+      if (passHash !== p.passHash) return this._err('Неверный пароль.', 'login')
+    } else {
+      // локальной записи нет — ищем учётку (ник+пароль) в публичных релеях
+      const btn = e.btnLogin
+      const btnText = btn.textContent
+      btn.disabled = true
+      btn.textContent = 'Ищем аккаунт…'
+      let chk = { status: 'free', name: '' }
+      try { chk = await NostrRendezvous.checkUname(username, passHash) } catch {}
+      btn.disabled = false
+      btn.textContent = btnText
+      if (chk.status !== 'own') {
+        return this._err('Аккаунт не найден: на этом устройстве записи нет, а в сети учётку с таким @ником и паролем не нашли. Зарегистрируйтесь — ник освободится, если пароль тот же.', 'login')
+      }
+      // восстановление: та же учётка найдена в сети — пересоздаём локально
+      Store.setProfile({ name: chk.name || username, username, passHash })
+      log(`аккаунт восстановлен из сети: @${username}`, 'ok')
+    }
 
     Store.setProfile({ authed: true })
     e.logPass.value = ''
     // освежаем заявку ника (для аккаунтов, зарегистрированных до её появления)
-    try { NostrRendezvous.publishUname(username, p.name, p.passHash) } catch {}
+    try { NostrRendezvous.publishUname(username, Store.data.profile.name, passHash) } catch {}
     if (!Store.lastSaveOk) UI.toast('Внимание: вход не сохраняется этим браузером')
     log(`вход: @${username}`, Store.lastSaveOk ? 'ok' : 'err')
     this.enter()
@@ -2239,20 +2336,25 @@ const NostrRendezvous = {
     return true
   },
 
-  /** Проверка занятости @юзернейма: REQ {'#d':['uname/<ник>'], kinds:[30078]}.
-   *  Возвращает 'taken' при ЧУЖОЙ заявке (другой pubkey и другой отпечаток
-   *  аккаунта acc) либо 'not'. Fail-open: без открытых сокетов или ответа за
-   *  2.5 с — 'not', регистрация не блокируется (офлайн-сборка должна работать). */
+  /** Проверка @юзернейма в релеях: REQ {'#d':['uname/<ник>'], kinds:[30078]}.
+   *  Возвращает {status, name}:
+   *   'free'  — заявок нет, ник свободен;
+   *   'own'   — есть только НАША учётка (совпал отпечаток пароля acc или наш
+   *             ключ подписи) — ник наш, можно пользоваться/восстановиться;
+   *   'taken' — чужая заявка: ник занят ДРУГИМ пользователем.
+   *  Fail-open: без сокетов или ответа за 2.5 с — 'free' (ничего не блокируем,
+   *  офлайн-сборка должна работать). */
   checkUname (username, acc) {
     return new Promise((resolve) => {
       const socks = this.relays.filter((r) => r.ws && r.ws.readyState === 1)
-      if (!this.key || !socks.length) return resolve('not')
+      if (!this.key || !socks.length) return resolve({ status: 'free', name: '' })
       const sub = 'foxosis-uname-' + rndId()
       const filter = { kinds: [CFG.UNAME_KIND], '#d': ['uname/' + username], limit: 10 }
       let done = false
       let eoses = 0
+      let ownName = ''
       const handlers = new Map()
-      const finish = (v) => {
+      const finish = (status) => {
         if (done) return
         done = true
         clearTimeout(timer)
@@ -2261,9 +2363,9 @@ const NostrRendezvous = {
           if (h) { try { r.ws.removeEventListener('message', h) } catch {} }
           try { if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify(['CLOSE', sub])) } catch {}
         }
-        resolve(v)
+        resolve({ status, name: ownName })
       }
-      const timer = setTimeout(() => finish('not'), 2500)
+      const timer = setTimeout(() => finish(ownName ? 'own' : 'free'), 2500)
       for (const r of socks) {
         const h = (ev) => {
           let f
@@ -2272,21 +2374,25 @@ const NostrRendezvous = {
           if (f[0] === 'EVENT') {
             const e = f[2]
             if (!e || typeof e !== 'object') return
-            if (e.pubkey === this.key.pub) return                 // своя заявка — не помеха
             let body = null
             try { body = JSON.parse(e.content) } catch {}
-            if (body && acc && body.acc === acc) return           // та же учётка (ник+пароль)
-            finish('taken')
+            const isOwn = e.pubkey === this.key.pub || !!(body && acc && body.acc === acc)
+            if (isOwn) {
+              // своя учётка — запомним имя профиля из заявки (для восстановления)
+              if (body && typeof body.name === 'string' && body.name) ownName = ownName || body.name
+              return
+            }
+            finish('taken')                       // чужая заявка — ник занят
           } else if (f[0] === 'EOSE') {
             eoses++
-            if (eoses >= socks.length) finish('not')
+            if (eoses >= socks.length) finish(ownName ? 'own' : 'free')
           }
         }
         handlers.set(r, h)
         try {
           r.ws.addEventListener('message', h)
           r.ws.send(JSON.stringify(['REQ', sub, filter]))
-        } catch { /* сокет умер — таймер даст 'not' */ }
+        } catch { /* сокет умер — таймер даст 'free' */ }
       }
     })
   }
@@ -2435,8 +2541,8 @@ class LocalRendezvous {
     const mine = Store.data.profile.username
     if (username && mine && username === mine && !this._dupWarned) {
       this._dupWarned = true
-      log(`@${username} одновременно используется другим устройством`, 'warn')
-      try { UI.toast('⚠️ @' + username + ' уже использует другое устройство') } catch {}
+      log(`@${username} также открыт на другом устройстве`, 'sys')
+      try { UI.toast('@' + username + ' ещё открыт на другом устройстве — ок, если это вы') } catch {}
     }
   }
 
