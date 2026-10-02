@@ -2,3 +2,14 @@ node_modules/
 .vercel/
 *.log
 .DS_Store
+
+# Android build (собранный APK лежит в dist/)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.cxx/
+
+# iOS build outputs (собирать на macOS)
+ios/App/build/
+ios/App/Pods/

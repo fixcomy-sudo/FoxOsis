@@ -4,3 +4,9 @@ server.js
 node_modules
 *.log
 .git
+
+# мобильные сборки — Vercel нужен только веб (index.html/app.js/logo.jpeg)
+android
+ios
+www
+dist
