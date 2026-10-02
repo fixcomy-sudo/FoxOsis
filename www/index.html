@@ -32,6 +32,10 @@
       --font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    /* Текст не выделяется (APK: долгое нажатие не открывает «Копировать /
+       Поделиться / Веб-поиск»). Разрешаем выделение в полях ввода и журнале. */
+    html, body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    input, textarea, [contenteditable="true"], .modal-log { -webkit-user-select: text; user-select: text; }
     ::selection { background: rgba(255,122,26,.30); }
     html, body { height: 100%; margin: 0; }
     body {
@@ -119,6 +123,26 @@
       color: transparent;
       letter-spacing: .2px;
     }
+
+    /* Статус глобального канала (Nostr-релеи) — видно и в APK:
+       показывает, найдёт ли приложение людей «в сети» */
+    .net-status {
+      display: flex; align-items: center; gap: 7px;
+      padding: 5px 16px 1px;
+      font-size: 11.5px;
+      color: var(--text-3);
+      cursor: pointer;
+    }
+    .net-status .dot {
+      width: 7px; height: 7px; flex: 0 0 7px;
+      border-radius: 50%;
+      background: var(--text-3);
+    }
+    .net-status.ok { color: var(--text-2); }
+    .net-status.ok .dot { background: var(--online); }
+    .net-status.warn .dot { background: var(--accent-2); }
+    .net-status.err { color: var(--danger); }
+    .net-status.err .dot { background: var(--danger); }
 
     /* Круглая стеклянная кнопка-иконка */
     .icon-btn {
@@ -1120,6 +1144,12 @@
           </button>
         </header>
 
+        <!-- Диагностика: живые релеи глобального канала и число найденных
+             собеседников (нажатие открывает профиль с журналом) -->
+        <div class="net-status warn" id="netStatus" title="Глобальный канал — нажмите для журнала">
+          <span class="dot"></span><span class="txt">глобальный канал запускается…</span>
+        </div>
+
         <!-- Поиск: по чатам и по юзернеймам «в сети» -->
         <div class="search-wrap">
           <div class="search">
@@ -1388,6 +1418,6 @@
   </script>
 
   <!-- Точка входа приложения -->
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.bundle.js"></script>
 </body>
 </html>

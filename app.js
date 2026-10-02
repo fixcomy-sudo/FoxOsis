@@ -194,6 +194,7 @@ const CFG = {
   ],
   NOSTR_ROOT: 'foxosis/v1',    // корень тегов приложения
   NOSTR_KIND: 21337,           // эфемерный kind (20000–29999) — без хранения
+  UNAME_KIND: 30078,           // адресный (d-тег) — релеи ХРАНЯТ: заявка @юзернейма
   NOSTR_BACKOFF_MS: [1000, 2000, 5000, 15000, 30000], // паузы между попытками
 
   // Дополнительные СВОИ ретрансляторы server.js в интернете (VPS) — полные
@@ -605,7 +606,7 @@ const UI = {
   init () {
     const ids = [
       'bootWarn', 'btnProfile', 'btnNewChat', 'btnBackList', 'searchInput',
-      'sideList', 'sideNew',
+      'sideList', 'sideNew', 'netStatus',
       'chatList', 'chatListEmpty', 'onlineList', 'onlineEmpty',
       'codesPanel', 'codeBox', 'btnMakeCode', 'btnAcceptCode', 'btnCopyCode', 'btnClearCode',
       'chatEmpty', 'chatActive', 'btnBack', 'chatAva', 'chatName', 'chatStatus',
@@ -640,6 +641,15 @@ const UI = {
     e.btnNewChat.onclick = () => this.showSide('new')
     e.btnBackList.onclick = () => this.showSide('list')
     e.searchInput.oninput = () => this.renderChatList()
+    if (e.netStatus) e.netStatus.onclick = () => this.showModal('profile')
+
+    // --- Android WebView: глушим длинное нажатие (меню «Копировать/
+    //     Поделиться/Веб-поиск») везде, кроме полей ввода и журнала ---
+    document.addEventListener('contextmenu', (ev) => {
+      const t = ev.target
+      if (t && t.closest && t.closest('input, textarea, .modal-log')) return
+      ev.preventDefault()
+    })
 
     // --- списки (делегирование кликов) ---
     e.chatList.onclick = (ev) => {
@@ -955,6 +965,33 @@ const UI = {
       el.textContent = 'не в сети'
       el.className = 'status'
     }
+  },
+
+  /** Строка состояния глобального канала: сколько релеев живы и сколько
+   *  собеседников найдено. Главный индикатор для APK: если «нет связи» —
+   *  телефон не достучался до публичных релеев (или их заблокировали). */
+  updateNetStatus () {
+    const el = this.els.netStatus
+    if (!el) return
+    const txt = el.querySelector('.txt')
+    if (!txt) return
+    let cls = 'warn'
+    let text = 'глобальный канал запускается…'
+    if (NostrRendezvous.started) {
+      const up = NostrRendezvous.relays.filter((r) => r.sub).length
+      const total = NostrRendezvous.relays.length
+      const online = Rendezvous.onlinePeers().length
+      if (up === 0) {
+        cls = 'err'
+        text = 'нет связи с глобальными релеями — контакты не найдутся'
+      } else {
+        cls = online > 0 ? 'ok' : 'warn'
+        text = `релея ${up}/${total} · в сети: ${online}` +
+          (online > 0 ? '' : ' — ждём собеседников (обе стороны должны быть онлайн)')
+      }
+    }
+    el.className = 'net-status ' + cls
+    txt.textContent = text
   },
 
   /* ---------- лента сообщений ------------------------------------------ */
@@ -1294,8 +1331,28 @@ const Auth = {
     if (pass.length < 4) return this._err('Пароль должен быть не короче 4 символов.', 'reg')
 
     const passHash = await this.hash(pass)
+
+    // Проверяем занятость ника в публичных релеях (fail-open: без интернета
+    // или до подключения — пропускаем, регистрация не должна вставать).
+    // Отпечаток acc = hash(пароля): та же учётка (ник+пароль) на другом
+    // устройстве — не помеха, чужой пароль при совпадении ника — блок.
+    const btn = e.btnRegister
+    const btnText = btn.textContent
+    btn.disabled = true
+    btn.textContent = 'Проверяем ник…'
+    let taken = false
+    try { taken = await NostrRendezvous.checkUname(username, passHash) === 'taken' } catch {}
+    btn.disabled = false
+    btn.textContent = btnText
+    if (taken) {
+      log(`@${username} уже занят другим пользователем — регистрация отклонена`, 'warn')
+      return this._err('@' + username + ' уже занят — придумайте другой юзернейм.', 'reg')
+    }
+
     Store.setProfile({ name, username, passHash, authed: true })
     e.regPass.value = ''
+    // заявка в релеи: другие устройства увидят, что ник занят
+    try { NostrRendezvous.publishUname(username, name, passHash) } catch {}
     if (!Store.lastSaveOk) {
       // честно предупреждаем: сессия продолжится, но при перезагрузке
       // аккаунт и чаты не вернутся — включите обычный браузер, не приватный
@@ -1320,6 +1377,8 @@ const Auth = {
 
     Store.setProfile({ authed: true })
     e.logPass.value = ''
+    // освежаем заявку ника (для аккаунтов, зарегистрированных до её появления)
+    try { NostrRendezvous.publishUname(username, p.name, p.passHash) } catch {}
     if (!Store.lastSaveOk) UI.toast('Внимание: вход не сохраняется этим браузером')
     log(`вход: @${username}`, Store.lastSaveOk ? 'ok' : 'err')
     this.enter()
@@ -2042,6 +2101,7 @@ const NostrRendezvous = {
         for (const m of queued) this.send(m)
         try { Rendezvous._tick() } catch {}      // свежий hello сразу в эфир
         try { Rendezvous._republish() } catch {} // незавершённый offer/answer — повтором
+        this._flushClaim()                       // заявка юзернейма — после обвала сети
       }
       return
     }
@@ -2137,14 +2197,98 @@ const NostrRendezvous = {
    *  sig = BIP-340 schnorr-подпись по id. sha256js работает и вне
    *  secure context (http на телефоне), как и весь остальной код. */
   _sign (content, topic) {
+    return this._signAny(CFG.NOSTR_KIND, [['t', topic]], content)
+  },
+
+  /** Подпись произвольного события (kind + свои теги) */
+  _signAny (kind, tags, content) {
     const created_at = Math.floor(Date.now() / 1000)
-    const tags = [['t', topic]]
     const pub = this.key.pub
     const idHex = sha256js(new TextEncoder().encode(
-      JSON.stringify([0, pub, created_at, CFG.NOSTR_KIND, tags, content])
+      JSON.stringify([0, pub, created_at, kind, tags, content])
     ))
     const sig = bytesToHex(schnorr.sign(hexToBytes(idHex), this.key.priv))
-    return { id: idHex, pubkey: pub, created_at, kind: CFG.NOSTR_KIND, tags, content, sig }
+    return { id: idHex, pubkey: pub, created_at, kind, tags, content, sig }
+  },
+
+  /** Заявка на @юзернейм: адресное событие kind 30078 с d='uname/<ник>'.
+   *  Релеи хранят его (в отличие от эфемерного hello), поэтому любое
+   *  устройство может проверить: занят ли ник. Публикуем сразу по открытым
+   *  сокетам, иначе — после первого EOSE (заявка лежит в _claim). */
+  publishUname (username, name, acc) {
+    if (!this.key) { try { this._loadKey() } catch { return } }
+    try {
+      this._claim = this._signAny(CFG.UNAME_KIND, [['d', 'uname/' + username]],
+        JSON.stringify({ username, name: name || '', acc: acc || '', ts: Date.now() }))
+    } catch { return }
+    if (this._flushClaim(true)) log('заявка на @' + username + ' опубликована в публичных релеях', 'ok')
+  },
+
+  /** Отправить незакрытую заявку юзернейма на все живые сокеты.
+   *  Возвращает true, если отправили хотя бы в один релей. */
+  _flushClaim (quiet) {
+    if (!this._claim) return false
+    const now = Date.now()
+    const socks = this.relays.filter((r) => r.ws && r.ws.readyState === 1 && r.mutedUntil < now)
+    if (!socks.length) return false
+    const frame = JSON.stringify(['EVENT', this._claim])
+    for (const r of socks) {
+      try { r.ws.send(frame) } catch { /* сокет умер — onclose переподключит */ }
+    }
+    if (!quiet) log('заявка на @юзернейм повторно отправлена в ' + socks.length + ' релеях', 'sys')
+    return true
+  },
+
+  /** Проверка занятости @юзернейма: REQ {'#d':['uname/<ник>'], kinds:[30078]}.
+   *  Возвращает 'taken' при ЧУЖОЙ заявке (другой pubkey и другой отпечаток
+   *  аккаунта acc) либо 'not'. Fail-open: без открытых сокетов или ответа за
+   *  2.5 с — 'not', регистрация не блокируется (офлайн-сборка должна работать). */
+  checkUname (username, acc) {
+    return new Promise((resolve) => {
+      const socks = this.relays.filter((r) => r.ws && r.ws.readyState === 1)
+      if (!this.key || !socks.length) return resolve('not')
+      const sub = 'foxosis-uname-' + rndId()
+      const filter = { kinds: [CFG.UNAME_KIND], '#d': ['uname/' + username], limit: 10 }
+      let done = false
+      let eoses = 0
+      const handlers = new Map()
+      const finish = (v) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        for (const r of socks) {
+          const h = handlers.get(r)
+          if (h) { try { r.ws.removeEventListener('message', h) } catch {} }
+          try { if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify(['CLOSE', sub])) } catch {}
+        }
+        resolve(v)
+      }
+      const timer = setTimeout(() => finish('not'), 2500)
+      for (const r of socks) {
+        const h = (ev) => {
+          let f
+          try { f = JSON.parse(ev.data) } catch { return }
+          if (!Array.isArray(f) || f[1] !== sub) return
+          if (f[0] === 'EVENT') {
+            const e = f[2]
+            if (!e || typeof e !== 'object') return
+            if (e.pubkey === this.key.pub) return                 // своя заявка — не помеха
+            let body = null
+            try { body = JSON.parse(e.content) } catch {}
+            if (body && acc && body.acc === acc) return           // та же учётка (ник+пароль)
+            finish('taken')
+          } else if (f[0] === 'EOSE') {
+            eoses++
+            if (eoses >= socks.length) finish('not')
+          }
+        }
+        handlers.set(r, h)
+        try {
+          r.ws.addEventListener('message', h)
+          r.ws.send(JSON.stringify(['REQ', sub, filter]))
+        } catch { /* сокет умер — таймер даст 'not' */ }
+      }
+    })
   }
 }
 
@@ -2286,6 +2430,14 @@ class LocalRendezvous {
       username: username || prev.username || '',
       ts: Date.now()
     })
+    // Дубль @юзернейма: кто-то в сети использует НАШ ник — предупреждаем
+    // один раз (в P2P без сервера уникальность не гарантирована, только заметна)
+    const mine = Store.data.profile.username
+    if (username && mine && username === mine && !this._dupWarned) {
+      this._dupWarned = true
+      log(`@${username} одновременно используется другим устройством`, 'warn')
+      try { UI.toast('⚠️ @' + username + ' уже использует другое устройство') } catch {}
+    }
   }
 
   /** Метаданные собеседника из каталога присутствия (или null) */
@@ -3359,6 +3511,7 @@ async function boot () {
   setInterval(keepAliveTick, CFG.KEEPALIVE_MS)
   setInterval(() => {
     UI.updateChatStatus()
+    UI.updateNetStatus()
     if (!UI.els.sideNew.hidden) UI.renderOnlineList()
   }, 2000)
 
