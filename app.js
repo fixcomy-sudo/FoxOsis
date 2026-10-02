@@ -217,8 +217,9 @@ const CFG = {
 
   // Тайминги
   CONNECT_TIMEOUT_MS: 10000,  // ожидание открытия WebRTC-канала
-  ICE_GATHER_MS: 5000,        // сколько ждать сбора ICE-кандидатов (TURN дольше)
-  SIG_RETRY_MS: 1500,         // повтор оффера/ансвера, пока не открыт канал
+  ICE_GATHER_MS: 2500,        // макс. ждать сбор ICE (обычно выходим раньше:
+                              // первый srflx/relay-кандидат + пауза 450 мс)
+  SIG_RETRY_MS: 700,          // повтор оффера/ансвера, пока не открыт канал
   SIG_COMPRESS_MIN: 700,      // JSON длиннее — сжимаем (deflate-raw):
                               // сжатый SDP ~в 3 раза меньше
   KEEPALIVE_MS: 60000,        // период "пингов" для поддержания потоков
@@ -380,14 +381,46 @@ function b64decode (str) {
   return out
 }
 
-/** Дождаться сбора ICE-кандидатов (не-trickle: кандидаты прямо в SDP) */
+/** Дождаться сбора ICE-кандидатов (не-trickle: кандидаты прямо в SDP).
+ *  Ранний выход, чтобы handshake занимал ~1 с, а не 5–10:
+ *   - gathering завершился сам ('complete') — выходим сразу;
+ *   - появился srflx/relay-кандидат (пусть через NAT) — ждём ещё 450 мс
+ *     «на всякий» пачку остальных STUN и выходим;
+ *   - кандидаты есть (даже host — локальная сеть), но 900 мс тишины —
+ *     новые уже не придут, выходим;
+ *   - общий потолок ICE_GATHER_MS (TURN-аллокация может зависнуть). */
 function waitIceGathering (pc, timeoutMs = CFG.ICE_GATHER_MS) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve()
   return new Promise(resolve => {
-    const done = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', onState); resolve() }
+    let settled = false
+    let firstAt = 0
+    let srflxTimer = null
+    let quietTimer = null
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer); clearTimeout(srflxTimer); clearTimeout(quietTimer)
+      pc.removeEventListener('icecandidate', onCand)
+      pc.removeEventListener('icegatheringstatechange', onState)
+      resolve()
+    }
     const onState = () => { if (pc.iceGatheringState === 'complete') done() }
-    const timer = setTimeout(done, timeoutMs) // STUN может молчать — не ждём вечно
+    const onCand = (evt) => {
+      if (!evt.candidate) { done(); return }          // null = сбор завершён
+      const s = evt.candidate.candidate || ''
+      if (!firstAt) firstAt = performance.now()
+      const isRelayOrSrflx = s.includes(' typ srflx ') || s.includes(' typ relay ')
+      if (isRelayOrSrflx && !srflxTimer) {
+        srflxTimer = setTimeout(done, 450)            // пачка остальных STUN успеет
+      }
+      clearTimeout(quietTimer)                        // тишина 900 мс после последнего
+      quietTimer = setTimeout(() => {
+        if (firstAt && performance.now() - firstAt >= 600) done()
+      }, 900)
+    }
+    const timer = setTimeout(done, timeoutMs) // потолок: STUN может молчать
     pc.addEventListener('icegatheringstatechange', onState)
+    pc.addEventListener('icecandidate', onCand)
   })
 }
 
@@ -3235,10 +3268,12 @@ class CallManager {
     log(`исходящий ${kind === 'voice' ? 'голосовой' : 'видео'}-звонок -> ${shortId(peer)}`, 'sys')
 
     try {
-      // 1) доступ к камере/микрофону
+      // 1) доступ к камере/микрофону (720p30 — резкий и не жрёт трафик)
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: kind === 'video',
-        audio: true
+        video: kind === 'video'
+          ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }
+          : false,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       })
       UI.els.localVideo.srcObject = this.localStream
       UI.setCallStatus('Вызов…')
@@ -3304,8 +3339,13 @@ class CallManager {
     log('принимаем вызов…', 'sys')
 
     try {
-      // 1) свой микрофон/камера
-      this.localStream = await navigator.mediaDevices.getUserMedia({ video: kind === 'video', audio: true })
+      // 1) свой микрофон/камера (те же запросы качества, что и у звонящего)
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        video: kind === 'video'
+          ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }
+          : false,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      })
       UI.els.localVideo.srcObject = this.localStream
 
       // 2) соединение: remote description (оффер), потом свои треки
@@ -3405,6 +3445,7 @@ class CallManager {
       const st = this.pc && this.pc.connectionState
       if (!st) return
       log('WebRTC: ' + st, st === 'connected' ? 'ok' : '')
+      if (st === 'connected') this._tuneSenders()   // перепроверим битрейты
       if (st === 'connected' && this.state === 'active') UI.setCallStatus('Соединено')
       if (st === 'failed') { UI.toast('Соединение не удалось'); this._teardown() }
     })
@@ -3429,6 +3470,37 @@ class CallManager {
       const already = this.pc.getSenders().some(s => s.track === track)
       if (!already) this.pc.addTrack(track, this.localStream)
     }
+    this._tuneSenders()
+  }
+
+  /** Качество отправляемого: WebRTC по умолчанию держит низкий битрейт
+   *  (~300–800 кбит/видео) — поднимаем до 2.5 Мбит/720p30, звук до 128 кбит,
+   *  приём — «не резать разрешение» (maintain-resolution).
+   *  setParameters — асинхронный и не любит параллельных вызовов (гонка
+   *  transactionId → Read-only field modified), поэтому флаг _tuning. */
+  _tuneSenders () {
+    if (!this.pc || this._tuning) return
+    const pc = this.pc
+    this._tuning = true
+    const jobs = pc.getSenders().map(async (sender) => {
+      const kind = sender.track && sender.track.kind
+      if (!kind) return
+      try {
+        const p = sender.getParameters()
+        if (!p.encodings || p.encodings.length === 0) p.encodings = [{}]
+        if (kind === 'video') {
+          p.encodings[0].maxBitrate = 2500000        // 2.5 Мбит/с
+          p.encodings[0].maxFramerate = 30
+          p.degradationPreference = 'maintain-resolution'
+        } else {
+          p.encodings[0].maxBitrate = 128000         // opus до 128 кбит/с
+        }
+        await sender.setParameters(p)
+      } catch (e) {
+        log('setParameters(' + kind + '): ' + e.message, 'warn')
+      }
+    })
+    Promise.all(jobs).finally(() => { this._tuning = false })
   }
 
   /** Полная очистка состояния звонка */
