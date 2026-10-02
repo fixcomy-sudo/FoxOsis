@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FoxOsis — P2P-мессенджер</title>
+  <link rel="icon" href="./logo.jpeg" type="image/jpeg">
+  <style>
+    /* ==================================================================
+       0. ПЕРЕМЕННЫЕ — «liquid glass»: белый фон + оранжевый градиент
+       ================================================================== */
+    :root {
+      --bg:           #fffaf6;  /* базовый светлый фон                    */
+      --glass:        rgba(255,255,255,.60);  /* полупрозрачное стекло    */
+      --glass-2:      rgba(255,255,255,.78);  /* плотнее стекло           */
+      --glass-brd:    rgba(255,255,255,.90);  /* светлая кромка стекла    */
+      --glass-sh:     0 16px 40px rgba(216,104,26,.10), 0 2px 8px rgba(70,35,5,.06);
+      --accent:       #ff7a1a;  /* оранжевый акцент                      */
+      --accent-2:     #ff9d2e;  /* светлый оранжевый                     */
+      --accent-3:     #ff6b00;  /* тёмный оранжевый                      */
+      --grad:         linear-gradient(135deg, #ff9d2e 0%, #ff6b00 100%);
+      --grad-soft:    linear-gradient(135deg, rgba(255,157,46,.24), rgba(255,107,0,.14));
+      --text:         #241c15;  /* основной текст                        */
+      --text-2:       #8b7f74;  /* вторичный текст                       */
+      --text-3:       #b3a79c;  /* подписи, время                         */
+      --line:         rgba(70,35,5,.10);  /* тонкие границы              */
+      --online:       #22c55e;  /* «в сети»                              */
+      --danger:       #ff4d4f;  /* красный (сброс звонка)                */
+      --danger-hi:    #ff7875;
+      --in-bubble:    rgba(255,255,255,.86); /* входящий пузырь (стекло)  */
+      --r:            16px;     /* базовое скругление                    */
+      --font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    ::selection { background: rgba(255,122,26,.30); }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.4 var(--font);
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: stretch;
+    }
+    /* Жидкие оранжевые пятна под интерфейсом — «жидкое стекло» ловит их */
+    body::before {
+      content: "";
+      position: fixed;
+      inset: -25%;
+      z-index: -1;
+      background:
+        radial-gradient(42% 42% at 18% 22%, rgba(255,157,46,.42), transparent 70%),
+        radial-gradient(38% 38% at 84% 16%, rgba(255,107,0,.26), transparent 70%),
+        radial-gradient(46% 46% at 70% 88%, rgba(255,205,130,.40), transparent 70%),
+        radial-gradient(40% 40% at 25% 82%, rgba(255,140,60,.22), transparent 70%),
+        var(--bg);
+      animation: drift 30s ease-in-out infinite alternate;
+    }
+    @keyframes drift {
+      to { transform: translate3d(-2.5%, 2%, 0) scale(1.05); }
+    }
+    button { font-family: inherit; }
+    input, textarea { font-family: inherit; }
+    ::-webkit-scrollbar { width: 7px; height: 7px; }
+    ::-webkit-scrollbar-thumb { background: rgba(120,80,40,.22); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(120,80,40,.38); }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    /* ==================================================================
+       1. ОБОЛОЧКА — две колонки в стеклянной панели
+       ================================================================== */
+    #app {
+      width: 100%;
+      max-width: 1280px;
+      height: 100%;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+      background: rgba(255,255,255,.42);
+      backdrop-filter: blur(26px) saturate(165%);
+      -webkit-backdrop-filter: blur(26px) saturate(165%);
+      box-shadow: var(--glass-sh);
+      opacity: 0;
+      transform: scale(.985);
+      transition: opacity .55s ease, transform .55s ease;
+    }
+    body.authorized #app { opacity: 1; transform: none; }
+
+    /* ================= ЛЕВАЯ КОЛОНКА (список чатов) =================== */
+    .sidebar {
+      width: 340px;
+      min-width: 300px;
+      background: var(--glass);
+      backdrop-filter: blur(30px) saturate(170%);
+      -webkit-backdrop-filter: blur(30px) saturate(170%);
+      border-right: 1px solid var(--glass-brd);
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .side-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+    .side-view[hidden] { display: none; }
+
+    .side-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      min-height: 58px;
+    }
+    .side-title {
+      font-size: 17px; font-weight: 700; flex: 1;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      background: var(--grad);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      letter-spacing: .2px;
+    }
+
+    /* Круглая стеклянная кнопка-иконка */
+    .icon-btn {
+      width: 40px; height: 40px;
+      flex: 0 0 40px;
+      border: 1px solid transparent;
+      border-radius: 50%;
+      background: transparent;
+      color: #7a6e63;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background .15s, color .15s, transform .1s, box-shadow .15s;
+      padding: 0;
+    }
+    .icon-btn:hover {
+      background: rgba(255,255,255,.85);
+      color: var(--accent);
+      box-shadow: 0 4px 14px rgba(216,104,26,.16);
+    }
+    .icon-btn:active { transform: scale(.92); }
+    .icon-btn svg { width: 22px; height: 22px; }
+
+    /* Поиск — белая стеклянная пилюля */
+    .search-wrap { padding: 8px 12px; }
+    .search {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--glass-2);
+      border: 1px solid var(--glass-brd);
+      border-radius: 20px;
+      padding: 8px 14px;
+      color: var(--text-3);
+      box-shadow: inset 0 1px 2px rgba(70,35,5,.05);
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .search:focus-within {
+      border-color: rgba(255,122,26,.55);
+      box-shadow: 0 0 0 3px rgba(255,122,26,.16);
+    }
+    .search svg { width: 17px; height: 17px; flex: 0 0 17px; }
+    .search input {
+      flex: 1; border: none; outline: none;
+      background: transparent; color: var(--text);
+      font-size: 14px; min-width: 0;
+    }
+    .search input::placeholder { color: var(--text-3); }
+
+    .section-label {
+      color: var(--text-3);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .6px;
+      text-transform: uppercase;
+      padding: 8px 16px 4px;
+      user-select: none;
+    }
+
+    /* ================= СПИСОК ЧАТОВ =================================== */
+    .chat-list { flex: 1; overflow-y: auto; min-height: 0; padding: 0 6px 8px; }
+    .list-empty {
+      color: var(--text-3);
+      text-align: center;
+      font-size: 13px;
+      padding: 24px 18px;
+      line-height: 1.6;
+    }
+    .list-empty[hidden] { display: none; }
+
+    .chat-row {
+      display: flex;
+      gap: 11px;
+      align-items: center;
+      padding: 9px 10px;
+      border-radius: 16px;
+      cursor: pointer;
+      transition: background .14s, transform .14s, box-shadow .14s;
+      user-select: none;
+      position: relative;
+    }
+    .chat-row:hover {
+      background: rgba(255,255,255,.85);
+      box-shadow: 0 6px 18px rgba(216,104,26,.12);
+    }
+    .chat-row:active { transform: scale(.985); }
+    .chat-row.active {
+      background: var(--grad-soft);
+      box-shadow: inset 3px 0 0 var(--accent), 0 6px 18px rgba(216,104,26,.14);
+    }
+    .chat-row:has(.badge-unread) .row-preview { color: var(--text); }
+    .chat-row .avatar { flex: 0 0 54px; width: 54px; height: 54px; font-size: 20px; }
+    .row-main { flex: 1; min-width: 0; }
+    .row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+    .row-name {
+      font-weight: 650; font-size: 15px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .row-name .handle { color: var(--accent); font-weight: 600; font-size: 13px; margin-left: 5px; }
+    .row-time { color: var(--text-3); font-size: 12px; flex: 0 0 auto; }
+    .row-bottom { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 2px; }
+    .row-preview {
+      color: var(--text-2);
+      font-size: 14px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .row-preview .tick { color: var(--accent); font-size: 12px; }
+    .row-preview .found { color: var(--accent); font-weight: 600; }
+    .badge-unread {
+      background: var(--grad);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      min-width: 22px; height: 22px;
+      border-radius: 11px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 6px;
+      flex: 0 0 auto;
+      box-shadow: 0 3px 10px rgba(255,107,0,.40);
+    }
+    .presence-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--online);
+      flex: 0 0 10px;
+      box-shadow: 0 0 0 2px rgba(255,255,255,.9);
+    }
+
+    /* ================= АВАТАРКИ ======================================= */
+    .avatar {
+      width: 46px; height: 46px;
+      border-radius: 50%;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 650;
+      font-size: 17px;
+      text-transform: uppercase;
+      user-select: none;
+      position: relative;
+      overflow: visible;
+      box-shadow: inset 0 -8px 16px rgba(0,0,0,.18), 0 4px 12px rgba(70,35,5,.22);
+    }
+    .avatar .dot {
+      position: absolute;
+      right: -1px; bottom: -1px;
+      width: 13px; height: 13px;
+      border-radius: 50%;
+      background: var(--online);
+      border: 2.5px solid #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.25);
+    }
+    .avatar.big { width: 72px; height: 72px; font-size: 28px; }
+
+    /* ================= НОВЫЙ ЧАТ ====================================== */
+    .newchat-body { flex: 1; overflow-y: auto; min-height: 0; padding-bottom: 16px; }
+    details.code-panel { margin: 10px 14px; }
+    details.code-panel summary {
+      cursor: pointer; color: var(--text-3); font-size: 13px;
+      padding: 8px 0; user-select: none; list-style: none;
+    }
+    details.code-panel summary::before { content: "▸ "; }
+    details.code-panel[open] summary::before { content: "▾ "; }
+    details.code-panel[open] summary { color: var(--text-2); }
+    #codeBox {
+      width: 100%; min-height: 70px; resize: vertical;
+      background: var(--glass-2);
+      border: 1px solid var(--glass-brd);
+      border-radius: 12px;
+      color: var(--text);
+      font-size: 12px;
+      padding: 9px 10px;
+      outline: none;
+      word-break: break-all;
+      box-shadow: inset 0 1px 3px rgba(70,35,5,.06);
+    }
+    #codeBox:focus { border-color: rgba(255,122,26,.55); box-shadow: 0 0 0 3px rgba(255,122,26,.15); }
+    .code-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .code-btns button {
+      background: rgba(255,255,255,.85);
+      border: 1px solid var(--line);
+      color: var(--text-2);
+      border-radius: 10px;
+      font-size: 12.5px;
+      padding: 7px 11px;
+      cursor: pointer;
+      transition: .15s;
+    }
+    .code-btns button:hover { color: var(--accent); border-color: rgba(255,122,26,.5); box-shadow: 0 4px 12px rgba(216,104,26,.15); }
+    .hint { color: var(--text-3); font-size: 12px; margin: 8px 0 0; line-height: 1.5; }
+
+    /* ================= ПРАВАЯ КОЛОНКА (переписка) ===================== */
+    .chat-pane {
+      flex: 1;
+      min-width: 0;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      background:
+        radial-gradient(900px 520px at 12% -8%, rgba(255,157,46,.14), transparent 62%),
+        radial-gradient(760px 520px at 98% 112%, rgba(255,107,0,.12), transparent 62%),
+        radial-gradient(circle at 30% 40%, rgba(255,157,46,.10) 0 2px, transparent 3px),
+        radial-gradient(circle at 72% 66%, rgba(255,107,0,.09) 0 2px, transparent 3px),
+        #fffdfb;
+      background-size: auto, auto, 190px 190px, 230px 230px, auto;
+    }
+
+    /* Пустое состояние — «Выберите чат» */
+    .chat-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: var(--text-2);
+      text-align: center;
+      padding: 30px;
+      user-select: none;
+    }
+    .chat-empty[hidden] { display: none; }
+    .chat-empty .bubble-ico {
+      width: 104px; height: 104px;
+      border-radius: 50%;
+      background: var(--grad);
+      box-shadow: 0 22px 50px rgba(255,107,0,.35), inset 0 2px 6px rgba(255,255,255,.55);
+      display: flex; align-items: center; justify-content: center;
+      animation: breathe 3.6s ease-in-out infinite;
+    }
+    @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+    .chat-empty .bubble-ico svg { width: 46px; height: 46px; color: #fff; }
+    .chat-empty p { margin: 0; font-size: 15px; line-height: 1.7; max-width: 340px; }
+
+    /* Активный чат */
+    .chat-active { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .chat-active[hidden] { display: none; }
+
+    .chat-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: var(--glass-2);
+      backdrop-filter: blur(24px) saturate(170%);
+      -webkit-backdrop-filter: blur(24px) saturate(170%);
+      border-bottom: 1px solid var(--glass-brd);
+      box-shadow: 0 6px 20px rgba(70,35,5,.06);
+      min-height: 58px;
+      z-index: 2;
+    }
+    .chat-header .avatar { flex: 0 0 40px; width: 40px; height: 40px; font-size: 16px; }
+    .chat-peer { flex: 1; min-width: 0; }
+    .chat-peer .name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-peer .name .handle { color: var(--accent); font-weight: 600; font-size: 13px; margin-left: 6px; }
+    .chat-peer .status { font-size: 13px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-peer .status.on { color: var(--online); font-weight: 600; }
+    .chat-peer .status.warn { color: #d97706; }
+    .chat-actions { display: flex; gap: 2px; }
+
+    /* ================= ЛЕНТА СООБЩЕНИЙ =============================== */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+      padding: 16px 7% 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scroll-behavior: smooth;
+    }
+    .day-sep {
+      align-self: center;
+      background: rgba(255,255,255,.85);
+      backdrop-filter: blur(10px);
+      color: var(--text-2);
+      font-size: 12.5px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      padding: 5px 14px;
+      border-radius: 14px;
+      margin: 14px 0 6px;
+      box-shadow: 0 4px 14px rgba(70,35,5,.10), inset 0 0 0 1px rgba(255,255,255,.9);
+      user-select: none;
+    }
+
+    .msg {
+      display: flex;
+      max-width: 72%;
+      animation: msgIn .18s cubic-bezier(.2,.7,.3,1) both;
+    }
+    .msg.me { align-self: flex-end; justify-content: flex-end; }
+    .msg.peer { align-self: flex-start; }
+    @keyframes msgIn { from { opacity: 0; transform: translateY(7px) scale(.97); } }
+    .bubble {
+      position: relative;
+      padding: 8px 13px 7px;
+      border-radius: 18px;
+      font-size: 14.5px;
+      line-height: 1.45;
+      min-width: 64px;
+      box-shadow: 0 6px 18px rgba(70,35,5,.10);
+    }
+    .msg.peer .bubble {
+      background: var(--in-bubble);
+      border: 1px solid rgba(255,255,255,.95);
+      color: var(--text);
+      border-bottom-left-radius: 6px;
+      backdrop-filter: blur(8px);
+    }
+    .msg.me .bubble {
+      background: linear-gradient(165deg, #ff9d2e 0%, #ff7a1a 75%);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.45);
+      border-bottom-right-radius: 6px;
+      box-shadow: 0 8px 22px rgba(255,122,26,.32);
+    }
+    /* сгруппированные подряд сообщения — срезаем «внутренние» углы */
+    .msg.peer + .msg.peer .bubble { border-top-left-radius: 6px; }
+    .msg.me + .msg.me .bubble { border-top-right-radius: 6px; }
+    /* Хвостик сообщения */
+    .bubble::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      width: 10px; height: 15px;
+    }
+    .msg.peer .bubble::after {
+      left: -7px;
+      background: var(--in-bubble);
+      border-bottom-right-radius: 12px;
+      clip-path: polygon(100% 0, 100% 100%, 0 100%);
+    }
+    .msg.me .bubble::after {
+      right: -7px;
+      background: #ff7a1a;
+      border-bottom-left-radius: 12px;
+      clip-path: polygon(0 0, 100% 100%, 0 100%);
+    }
+    .bubble .text { white-space: pre-wrap; word-break: break-word; }
+    /* Время/галочки — обтекаются текстом снизу справа */
+    .bubble .meta {
+      float: right;
+      position: relative;
+      top: 5px;
+      margin: 10px -6px -3px 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11.5px;
+      color: rgba(70,35,5,.45);
+      user-select: none;
+      white-space: nowrap;
+    }
+    .msg.me .meta { color: rgba(255,255,255,.85); }
+    .msg.me .meta .tick { color: #fff; letter-spacing: -2px; font-size: 12px; }
+    .bubble .sender-name { display: block; font-size: 13px; font-weight: 700; margin-bottom: 1px; }
+
+    /* ================= КОМПОЗЕР (поле ввода) ========================== */
+    .composer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px 12px;
+      background: var(--glass-2);
+      backdrop-filter: blur(24px) saturate(170%);
+      -webkit-backdrop-filter: blur(24px) saturate(170%);
+      border-top: 1px solid var(--glass-brd);
+      box-shadow: 0 -6px 20px rgba(70,35,5,.05);
+    }
+    .composer .field {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      background: rgba(255,255,255,.92);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 9px 6px 9px 16px;
+      min-width: 0;
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .composer .field:focus-within {
+      border-color: rgba(255,122,26,.55);
+      box-shadow: 0 0 0 3px rgba(255,122,26,.15);
+    }
+    .composer input {
+      flex: 1;
+      border: none; outline: none;
+      background: transparent;
+      color: var(--text);
+      font-size: 15px;
+      min-width: 0;
+    }
+    .composer input::placeholder { color: var(--text-3); }
+    .send-btn {
+      width: 46px; height: 46px;
+      flex: 0 0 46px;
+      border: none;
+      border-radius: 50%;
+      background: var(--grad);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform .12s, box-shadow .15s;
+      box-shadow: 0 10px 24px rgba(255,107,0,.40), inset 0 1px 3px rgba(255,255,255,.5);
+    }
+    .send-btn:hover { transform: translateY(-1px); box-shadow: 0 14px 30px rgba(255,107,0,.50); }
+    .send-btn:active { transform: scale(.9); }
+    .send-btn svg { width: 22px; height: 22px; margin-left: 2px; }
+
+    /* ================= ОВЕРЛЕЙ ЗВОНКА ================================= */
+    .call-overlay {
+      position: absolute;
+      inset: 0;
+      background: #17100a;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+    }
+    .call-overlay[hidden] { display: none; }
+    .call-video-wrap { flex: 1; position: relative; min-height: 0; overflow: hidden; }
+    #remoteVideo {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      background: #17100a;
+    }
+    .call-overlay.voice #remoteVideo { display: none; }
+    .call-overlay.voice .call-video-wrap {
+      display: flex; align-items: center; justify-content: center;
+      background:
+        radial-gradient(600px 340px at 50% 22%, rgba(255,157,46,.30), transparent 72%),
+        linear-gradient(165deg, #fff3e6, #ffe2c6);
+    }
+    #localVideo {
+      position: absolute;
+      top: 16px; right: 16px;
+      width: 156px;
+      aspect-ratio: 3/4;
+      object-fit: cover;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.35);
+      z-index: 2;
+      background: #221509;
+      transition: transform .15s;
+    }
+    #localVideo:hover { transform: scale(1.03); }
+    .call-overlay.voice #localVideo { display: none; }
+    .call-avatar { display: none; }
+    .call-overlay.voice .call-avatar {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      color: var(--text-2);
+      z-index: 1;
+    }
+    .call-overlay.voice .avatar.big { box-shadow: inset 0 -8px 16px rgba(0,0,0,.18), 0 16px 40px rgba(255,107,0,.30); }
+    .call-info {
+      position: absolute;
+      left: 0; right: 0; top: 0;
+      padding: 16px 18px;
+      background: linear-gradient(rgba(0,0,0,.55), transparent);
+      z-index: 3;
+      pointer-events: none;
+      color: #fff;
+    }
+    .call-overlay.voice .call-info {
+      background: none;
+      color: var(--text);
+    }
+    .call-info .cname { font-size: 19px; font-weight: 700; }
+    .call-info .cstatus { font-size: 14px; color: inherit; opacity: .8; margin-top: 2px; }
+    .call-controls {
+      display: flex;
+      justify-content: center;
+      gap: 26px;
+      padding: 20px;
+      background: linear-gradient(transparent, rgba(20,12,6,.55));
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      z-index: 4;
+    }
+    .call-overlay.voice .call-controls { background: linear-gradient(transparent, rgba(255,235,215,.75)); }
+    .ctl {
+      width: 64px; height: 64px;
+      border: 1px solid rgba(255,255,255,.4);
+      border-radius: 50%;
+      background: rgba(255,255,255,.85);
+      color: #241c15;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform .12s, background .15s, box-shadow .15s;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 8px 22px rgba(0,0,0,.25);
+    }
+    .ctl:hover { background: #fff; transform: translateY(-2px); }
+    .ctl:active { transform: scale(.9); }
+    .ctl svg { width: 28px; height: 28px; }
+    .ctl.red {
+      background: linear-gradient(135deg, #ff6b6b, #ff3b30);
+      color: #fff;
+      border-color: rgba(255,255,255,.35);
+    }
+    .ctl.red:hover { background: var(--danger-hi); box-shadow: 0 10px 26px rgba(255,59,48,.45); }
+    .ctl.green {
+      background: linear-gradient(135deg, #4ade80, #16a34a);
+      color: #fff;
+      border-color: rgba(255,255,255,.35);
+    }
+    .ctl.green:hover { background: #22c55e; box-shadow: 0 10px 26px rgba(34,197,94,.45); }
+    .ctl.hang svg { transform: rotate(135deg); }
+
+    /* ================= ВХОДЯЩИЙ ЗВОНОК ================================= */
+    .incoming {
+      position: absolute;
+      inset: 0;
+      z-index: 40;
+      background: rgba(255,250,246,.55);
+      backdrop-filter: blur(16px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .incoming[hidden] { display: none; }
+    .incoming-card {
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(30px) saturate(170%);
+      border: 1px solid var(--glass-brd);
+      border-radius: 24px;
+      padding: 30px 36px 26px;
+      text-align: center;
+      box-shadow: var(--glass-sh);
+      max-width: 340px;
+      width: 100%;
+      animation: pop .22s ease;
+    }
+    @keyframes pop { from { transform: scale(.92); opacity: 0; } }
+    @keyframes ringPulse {
+      0%   { box-shadow: inset 0 -8px 16px rgba(0,0,0,.18), 0 0 0 0 rgba(255,107,0,.45); }
+      70%  { box-shadow: inset 0 -8px 16px rgba(0,0,0,.18), 0 0 0 18px rgba(255,107,0,0); }
+      100% { box-shadow: inset 0 -8px 16px rgba(0,0,0,.18), 0 0 0 0 rgba(255,107,0,0); }
+    }
+    .incoming-card .avatar { margin: 0 auto 14px; animation: ringPulse 1.8s ease-out infinite; }
+    .incoming-card .iname { font-size: 20px; font-weight: 700; }
+    .incoming-card .itype { color: var(--text-2); font-size: 14px; margin-top: 4px; margin-bottom: 22px; }
+    .incoming-btns { display: flex; justify-content: center; gap: 34px; }
+
+    /* ================= МОДАЛЬНОЕ ОКНО (профиль) ======================= */
+    .modal {
+      position: absolute;
+      inset: 0;
+      z-index: 50;
+      background: rgba(255,250,246,.55);
+      backdrop-filter: blur(12px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+    }
+    .modal[hidden] { display: none; }
+    .modal-card {
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(30px) saturate(170%);
+      border: 1px solid var(--glass-brd);
+      border-radius: 24px;
+      padding: 26px 28px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: var(--glass-sh);
+      animation: pop .2s ease;
+      max-height: 90%;
+      overflow-y: auto;
+    }
+    .modal-card h3 { margin: 0 0 4px; font-size: 19px; }
+    .modal-card .sub { color: var(--text-2); font-size: 13.5px; margin: 0 0 18px; line-height: 1.5; }
+    .modal-card .avatar { margin: 0 auto 16px; }
+    .name-input {
+      width: 100%;
+      background: rgba(255,255,255,.92);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      color: var(--text);
+      font-size: 16px;
+      padding: 12px 14px;
+      outline: none;
+      margin-bottom: 14px;
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .name-input:focus { border-color: rgba(255,122,26,.55); box-shadow: 0 0 0 3px rgba(255,122,26,.15); }
+    .id-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255,255,255,.8);
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      padding: 9px 12px;
+      margin-bottom: 16px;
+    }
+    .id-row .id-label { color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+    .id-row code {
+      flex: 1;
+      font-size: 11.5px;
+      color: var(--text-2);
+      word-break: break-all;
+      user-select: all;
+    }
+    .id-row button {
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 8px;
+      flex: 0 0 auto;
+    }
+    .id-row button:hover { background: rgba(255,122,26,.12); }
+    .btn-primary {
+      width: 100%;
+      border: none;
+      background: var(--grad);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 700;
+      border-radius: 14px;
+      padding: 13px;
+      cursor: pointer;
+      transition: transform .12s, box-shadow .15s;
+      box-shadow: 0 10px 26px rgba(255,107,0,.35), inset 0 1px 3px rgba(255,255,255,.5);
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 14px 32px rgba(255,107,0,.45); }
+    .btn-primary:active { transform: scale(.98); }
+    .btn-primary:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+    .btn-ghost {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.8);
+      color: var(--text-2);
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 14px;
+      padding: 11px;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: .15s;
+    }
+    .btn-ghost:hover { color: var(--danger); border-color: rgba(255,77,79,.5); box-shadow: 0 6px 16px rgba(255,77,79,.15); }
+    .modal-log {
+      margin-top: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .modal-log summary { color: var(--text-3); font-size: 12.5px; cursor: pointer; user-select: none; }
+    #log {
+      max-height: 150px;
+      overflow-y: auto;
+      font-size: 11.5px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding-top: 8px;
+      font-family: Consolas, monospace;
+    }
+    #log .l { color: var(--text-3); }
+    #log .l.ok { color: #16a34a; }
+    #log .l.err { color: #dc2626; }
+    #log .l.warn { color: #d97706; }
+    #log .l.sys { color: var(--accent); }
+
+    /* ================= ЭКРАНЫ: ЗАСТАВКА И АВТОРИЗАЦИЯ ================ */
+    .screen {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      transition: opacity .55s ease, transform .55s ease, filter .55s ease;
+      /* собственный «жидкий» фон — те же оранжевые пятна */
+      background:
+        radial-gradient(46% 46% at 20% 24%, rgba(255,157,46,.50), transparent 70%),
+        radial-gradient(40% 40% at 84% 18%, rgba(255,107,0,.30), transparent 70%),
+        radial-gradient(50% 50% at 72% 88%, rgba(255,205,130,.45), transparent 70%),
+        var(--bg);
+    }
+    .screen.gone {
+      opacity: 0;
+      transform: scale(1.07);
+      filter: blur(14px);
+      pointer-events: none;
+      visibility: hidden;
+      transition: opacity .55s ease, transform .55s ease, filter .55s ease, visibility 0s .55s;
+    }
+    #auth {
+      opacity: 0;
+      transform: translateY(44px) scale(.96);
+      filter: blur(10px);
+      pointer-events: none;
+      visibility: hidden;
+      z-index: 79;
+    }
+    #auth.shown {
+      opacity: 1;
+      transform: none;
+      filter: none;
+      pointer-events: auto;
+      visibility: visible;
+    }
+
+    /* --- заставка: логотип + стрелочка в шарике --- */
+    .splash-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+      text-align: center;
+      animation: splashIn .6s cubic-bezier(.22,.9,.3,1) both;
+    }
+    @keyframes splashIn { from { opacity: 0; transform: translateY(26px); } }
+    .splash-logo {
+      width: 110px; height: 110px;
+      border-radius: 32px;
+      background: var(--grad);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 26px 60px rgba(255,107,0,.40), inset 0 2px 8px rgba(255,255,255,.6);
+      border: 1px solid rgba(255,255,255,.55);
+      position: relative;
+      overflow: hidden;
+    }
+    .splash-logo::before {
+      content: "";
+      position: absolute;
+      top: -40%; left: -30%;
+      width: 80%; height: 80%;
+      background: radial-gradient(closest-side, rgba(255,255,255,.75), transparent);
+      transform: rotate(-18deg);
+    }
+    .splash-logo svg { width: 56px; height: 56px; color: #fff; position: relative; }
+    /* логотип проекта (logo.jpeg) поверх SVG-плейсхолдера, при отсутствии
+       файла картинка сама удаляется и остаётся исходный SVG */
+    .splash-logo .logo-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; z-index: 1; }
+    .auth-brand .mini-logo { position: relative; overflow: hidden; }
+    .auth-brand .mini-logo .logo-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; z-index: 1; }
+    .side-title .logo-img { width: 22px; height: 22px; border-radius: 7px; object-fit: cover; vertical-align: -4px; margin-right: 7px; box-shadow: 0 2px 6px rgba(255,107,0,.35); }
+    .splash-title {
+      margin: 6px 0 0;
+      font-size: 44px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      background: linear-gradient(120deg, #ff8a1f, #ff5f00 60%, #ff9d2e);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      text-shadow: 0 12px 34px rgba(255,107,0,.25);
+    }
+    .splash-sub {
+      margin: 0;
+      color: var(--text-2);
+      font-size: 15.5px;
+      line-height: 1.65;
+      max-width: 420px;
+    }
+    /* стрелочка в шарике */
+    .orb-btn {
+      margin-top: 14px;
+      width: 96px; height: 96px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,.6);
+      background: var(--grad);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      position: relative;
+      box-shadow: 0 24px 55px rgba(255,107,0,.45), inset 0 2px 6px rgba(255,255,255,.65), inset 0 -8px 18px rgba(170,60,0,.35);
+      transition: transform .25s cubic-bezier(.22,.9,.3,1), box-shadow .25s;
+      animation: orbPulse 2.8s ease-in-out infinite;
+    }
+    .orb-btn::before {
+      content: "";
+      position: absolute;
+      top: 8px; left: 14px;
+      width: 44px; height: 26px;
+      background: radial-gradient(closest-side, rgba(255,255,255,.85), transparent);
+      border-radius: 50%;
+      transform: rotate(-20deg);
+      pointer-events: none;
+    }
+    .orb-btn:hover { transform: scale(1.08); box-shadow: 0 30px 65px rgba(255,107,0,.55), inset 0 2px 6px rgba(255,255,255,.65); }
+    .orb-btn:active { transform: scale(.96); }
+    .orb-btn svg { width: 40px; height: 40px; margin-left: 4px; position: relative; }
+    @keyframes orbPulse {
+      0%, 100% { box-shadow: 0 24px 55px rgba(255,107,0,.45), inset 0 2px 6px rgba(255,255,255,.65), inset 0 -8px 18px rgba(170,60,0,.35), 0 0 0 0 rgba(255,107,0,.35); }
+      50%      { box-shadow: 0 24px 55px rgba(255,107,0,.45), inset 0 2px 6px rgba(255,255,255,.65), inset 0 -8px 18px rgba(170,60,0,.35), 0 0 0 28px rgba(255,107,0,0); }
+    }
+    .orb-hint { color: var(--text-3); font-size: 13.5px; letter-spacing: .4px; }
+
+    /* --- карточка регистрации/входа --- */
+    .auth-card {
+      width: 100%;
+      max-width: 420px;
+      background: rgba(255,255,255,.72);
+      backdrop-filter: blur(34px) saturate(180%);
+      -webkit-backdrop-filter: blur(34px) saturate(180%);
+      border: 1px solid var(--glass-brd);
+      border-radius: 28px;
+      padding: 30px 30px 26px;
+      box-shadow: 0 34px 80px rgba(216,104,26,.20), 0 4px 14px rgba(70,35,5,.08);
+      animation: pop .35s cubic-bezier(.22,.9,.3,1);
+    }
+    .auth-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .auth-brand .mini-logo {
+      width: 46px; height: 46px;
+      border-radius: 14px;
+      background: var(--grad);
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 10px 24px rgba(255,107,0,.35), inset 0 1px 4px rgba(255,255,255,.55);
+    }
+    .auth-brand .mini-logo svg { width: 24px; height: 24px; color: #fff; }
+    .auth-brand .b-title { font-size: 19px; font-weight: 800; }
+    .auth-brand .b-sub { font-size: 13px; color: var(--text-2); }
+    /* вкладки */
+    .auth-tabs {
+      display: flex;
+      background: rgba(70,35,5,.07);
+      border-radius: 14px;
+      padding: 4px;
+      gap: 4px;
+      margin-bottom: 18px;
+    }
+    .auth-tabs button {
+      flex: 1;
+      border: none;
+      background: transparent;
+      color: var(--text-2);
+      font-size: 14.5px;
+      font-weight: 700;
+      padding: 10px;
+      border-radius: 11px;
+      cursor: pointer;
+      transition: background .2s, color .2s, box-shadow .2s;
+    }
+    .auth-tabs button.active {
+      background: linear-gradient(135deg, #fff, #fff6ee);
+      color: var(--accent);
+      box-shadow: 0 4px 14px rgba(216,104,26,.18);
+    }
+    .auth-field { margin-bottom: 12px; }
+    .auth-field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--text-3);
+      margin-bottom: 6px;
+    }
+    .auth-field .in-wrap {
+      display: flex;
+      align-items: center;
+      background: rgba(255,255,255,.92);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 0 14px;
+      transition: box-shadow .15s, border-color .15s;
+    }
+    .auth-field .in-wrap:focus-within {
+      border-color: rgba(255,122,26,.6);
+      box-shadow: 0 0 0 3px rgba(255,122,26,.15);
+    }
+    .auth-field .at { color: var(--accent); font-weight: 700; margin-right: 4px; }
+    .auth-field input {
+      flex: 1;
+      border: none; outline: none;
+      background: transparent;
+      color: var(--text);
+      font-size: 15.5px;
+      padding: 13px 0;
+      min-width: 0;
+    }
+    .auth-field input::placeholder { color: var(--text-3); }
+    .auth-error {
+      background: rgba(255,77,79,.12);
+      border: 1px solid rgba(255,77,79,.35);
+      color: #d43538;
+      font-size: 13.5px;
+      border-radius: 12px;
+      padding: 9px 12px;
+      margin-bottom: 12px;
+      line-height: 1.45;
+    }
+    .auth-error[hidden] { display: none; }
+    .auth-note {
+      color: var(--text-3);
+      font-size: 12px;
+      line-height: 1.55;
+      margin: 12px 0 0;
+      text-align: center;
+    }
+    .auth-form[hidden] { display: none; }
+
+    /* ================= ТОСТ (всплывающие уведомления) ================= */
+    #toast {
+      position: absolute;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%) translateY(20px);
+      background: rgba(34,24,16,.92);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.14);
+      padding: 10px 18px;
+      border-radius: 14px;
+      font-size: 14px;
+      box-shadow: 0 14px 36px rgba(0,0,0,.35);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .2s, transform .2s;
+      z-index: 60;
+      max-width: 80%;
+      text-align: center;
+      backdrop-filter: blur(10px);
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* ================= БАННЕР ОБ ОШИБКАХ ЗАПУСКА ====================== */
+    #bootWarn {
+      position: absolute;
+      top: 10px; left: 10px; right: 10px;
+      z-index: 90;
+      background: rgba(255,243,224,.96);
+      border: 1px solid #ffb35c;
+      color: #8a4b00;
+      border-radius: 14px;
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+      box-shadow: 0 10px 30px rgba(216,104,26,.18);
+      backdrop-filter: blur(12px);
+    }
+    #bootWarn[hidden] { display: none; }
+
+    /* ================= ПЛАВНАЯ АНИМАЦИЯ ЭКРАНОВ ======================= */
+    .fade-in { animation: fadeIn .18s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } }
+
+    /* ================= АДАПТИВ (мобильные экраны) ====================== */
+    .back-btn { display: none; }
+    @media (max-width: 760px) {
+      .sidebar { width: 100%; min-width: 0; border-right: none; }
+      .chat-pane { display: none; }
+      body.chat-open .sidebar { display: none; }
+      body.chat-open .chat-pane { display: flex; }
+      .back-btn { display: inline-flex; }
+      .messages { padding: 14px 12px 18px; }
+      .msg { max-width: 86%; }
+      #localVideo { width: 100px; }
+      .splash-title { font-size: 34px; }
+      .auth-card { padding: 24px 20px 22px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Баннер предупреждений запуска (file://, небезопасный контекст) -->
+  <div id="bootWarn" hidden></div>
+
+  <div id="app">
+
+    <!-- ==================== ЛЕВАЯ КОЛОНКА ============================= -->
+    <aside class="sidebar">
+
+      <!-- Режим 1: список «Недавние» -->
+      <div class="side-view" id="sideList">
+        <header class="side-header">
+          <button class="icon-btn" id="btnProfile" title="Профиль">
+            <!-- человек -->
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-8 2-8 4.5V21h16v-2.5C20 16 16 14 12 14Z"/></svg>
+          </button>
+          <div class="side-title"><img src="./logo.jpeg" alt="" class="logo-img" onerror="this.remove()">FoxOsis</div>
+          <button class="icon-btn" id="btnNewChat" title="Новый чат">
+            <!-- карандаш -->
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25Zm17.7-10.2a1 1 0 0 0 0-1.41l-2.34-2.35a1 1 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82Z"/></svg>
+          </button>
+        </header>
+
+        <!-- Поиск: по чатам и по юзернеймам «в сети» -->
+        <div class="search-wrap">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
+            <input id="searchInput" type="text" placeholder="Поиск по имени или @юзернейму" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="section-label">Недавние</div>
+        <div class="chat-list" id="chatList"></div>
+        <div class="list-empty" id="chatListEmpty">
+          Здесь появятся ваши чаты.<br>Найдите собеседника поиском по @юзернейму<br>или нажмите <b>✎</b>.
+        </div>
+      </div>
+
+      <!-- Режим 2: новый чат (контакты онлайн + подключение по коду) -->
+      <div class="side-view" id="sideNew" hidden>
+        <header class="side-header">
+          <button class="icon-btn" id="btnBackList" title="Назад">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m7 7-7-7 7-7"/></svg>
+          </button>
+          <div class="side-title">Новый чат</div>
+        </header>
+
+        <div class="newchat-body">
+          <div class="section-label">В сети сейчас</div>
+          <div class="chat-list" id="onlineList"></div>
+          <div class="list-empty" id="onlineEmpty">
+            Никого не найдено.<br>
+            Откройте эту страницу во второй вкладке —<br>собеседник появится здесь автоматически.
+          </div>
+
+          <!-- Запасной путь для РАЗНЫХ устройств/сетей: обмен кодами -->
+          <details class="code-panel" id="codesPanel">
+            <summary>Подключение по коду (другое устройство / сеть)</summary>
+            <textarea id="codeBox" spellcheck="false"
+              placeholder="Сюда вставляется код собеседника — или здесь появится ваш код"></textarea>
+            <div class="code-btns">
+              <button id="btnMakeCode">Создать код</button>
+              <button id="btnAcceptCode">Принять код</button>
+              <button id="btnCopyCode">Копировать</button>
+              <button id="btnClearCode">Очистить</button>
+            </div>
+            <p class="hint">
+              A: «Создать код» → отправить B. B: вставить → «Принять код» → отправить ответный код обратно.
+              A: вставить ответ → «Принять код». ID передаются внутри кода автоматически.
+            </p>
+          </details>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ==================== ПРАВАЯ КОЛОНКА ============================ -->
+    <section class="chat-pane" id="chatPane">
+
+      <!-- Пустое состояние -->
+      <div class="chat-empty" id="chatEmpty">
+        <div class="bubble-ico">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Z"/></svg>
+        </div>
+        <p>Выберите чат в списке слева<br>или найдите собеседника поиском по @юзернейму —<br>и переписывайтесь без серверов.</p>
+      </div>
+
+      <!-- Активный чат -->
+      <div class="chat-active" id="chatActive" hidden>
+        <header class="chat-header">
+          <button class="icon-btn back-btn" id="btnBack" title="Назад">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m7 7-7-7 7-7"/></svg>
+          </button>
+          <div class="avatar" id="chatAva">?</div>
+          <div class="chat-peer">
+            <div class="name" id="chatName">Собеседник</div>
+            <div class="status" id="chatStatus">не в сети</div>
+          </div>
+          <div class="chat-actions">
+            <button class="icon-btn" id="btnCallVoice" title="Голосовой звонок">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C11.3 21 3 12.7 3 2.5c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .7-.2 1L6.6 10.8Z"/></svg>
+            </button>
+            <button class="icon-btn" id="btnCallVideo" title="Видеозвонок">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.6-.4-1-1-1H4c-.6 0-1 .4-1 1v10c0 .6.4 1 1 1h12c.6 0 1-.4 1-1v-3.5l4 4v-11l-4 4Z"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <!-- Лента сообщений -->
+        <div class="messages" id="messages"></div>
+
+        <!-- Поле ввода -->
+        <footer class="composer">
+          <div class="field">
+            <input id="msgInput" type="text" placeholder="Написать сообщение…" autocomplete="off">
+          </div>
+          <button class="send-btn" id="btnSend" title="Отправить">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 21 23 12 2 3v7l15 2-15 2v7Z"/></svg>
+          </button>
+        </footer>
+      </div>
+
+      <!-- Оверлей активного звонка -->
+      <div class="call-overlay" id="callOverlay" hidden>
+        <div class="call-video-wrap">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div class="call-avatar">
+            <div class="avatar big" id="callAvaBig">?</div>
+          </div>
+        </div>
+        <video id="localVideo" autoplay muted playsinline></video>
+        <div class="call-info">
+          <div class="cname" id="callName">Собеседник</div>
+          <div class="cstatus" id="callStatus">Соединение…</div>
+        </div>
+        <div class="call-controls">
+          <button class="ctl red hang" id="btnHangup" title="Положить трубку">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C11.3 21 3 12.7 3 2.5c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .7-.2 1L6.6 10.8Z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Входящий звонок -->
+      <div class="incoming" id="incoming" hidden>
+        <div class="incoming-card">
+          <div class="avatar big" id="incAva">?</div>
+          <div class="iname" id="incName">Собеседник</div>
+          <div class="itype" id="incType">Входящий звонок…</div>
+          <div class="incoming-btns">
+            <button class="ctl green" id="btnAccept" title="Принять">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C11.3 21 3 12.7 3 2.5c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .7-.2 1L6.6 10.8Z"/></svg>
+            </button>
+            <button class="ctl red hang" id="btnDecline" title="Отклонить">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C11.3 21 3 12.7 3 2.5c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .7-.2 1L6.6 10.8Z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Модальное окно: профиль (имя, peer id, журнал) -->
+    <div class="modal" id="modal" hidden>
+      <div class="modal-card">
+        <h3 id="modalTitle">Профиль</h3>
+        <p class="sub" id="modalSub">Имя видно собеседникам. Peer ID — технический идентификатор узла.</p>
+        <div class="avatar big" id="modalAva" style="background:#ff7a1a;cursor:pointer" title="Нажмите, чтобы выбрать фото">?</div>
+        <input type="file" id="avaFile" accept="image/*" hidden>
+        <input class="name-input" id="nameInput" type="text" maxlength="32"
+               placeholder="Ваше имя" autocomplete="off">
+        <div class="id-row">
+          <div>
+            <div class="id-label">Peer ID (для отладки)</div>
+            <code id="myId">…</code>
+          </div>
+          <button id="btnCopyId">копировать</button>
+        </div>
+        <button class="btn-primary" id="btnSaveName">Сохранить</button>
+        <button class="btn-ghost" id="btnLogout">Выйти из аккаунта</button>
+        <details class="modal-log">
+          <summary>Журнал событий</summary>
+          <div id="log"></div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Всплывающие уведомления -->
+    <div id="toast"></div>
+  </div>
+
+  <!-- =====================================================================
+       ЭКРАН 1: заставка — логотип и стрелочка в шарике.
+       По нажатию плавно улетает вглубь (blur+scale) и открывается
+       экран регистрации/входа (#auth) с плавным появлением.
+       ===================================================================== -->
+  <div class="screen" id="splash">
+    <div class="splash-inner">
+      <div class="splash-logo">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Zm-7 7H9V7h4v2Zm4 4H9v-2h8v2Zm0 4H9v-2h8v2Z"/></svg>
+        <img src="./logo.jpeg" alt="" class="logo-img" onerror="this.remove()">
+      </div>
+      <h1 class="splash-title">FoxOsis</h1>
+      <p class="splash-sub">Приватный P2P-мессенджер: сообщения и звонки<br>ходят напрямую между устройствами — без серверов и слежки.</p>
+      <button class="orb-btn" id="btnEnter" title="Начать">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+      </button>
+      <span class="orb-hint">Нажмите, чтобы войти</span>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       ЭКРАН 2: регистрация / вход — имя, @юзернейм (для поиска), пароль.
+       ===================================================================== -->
+  <div class="screen" id="auth">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="mini-logo">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2Z"/></svg>
+          <img src="./logo.jpeg" alt="" class="logo-img" onerror="this.remove()">
+        </div>
+        <div>
+          <div class="b-title">FoxOsis</div>
+          <div class="b-sub">войдите, чтобы найти собеседников</div>
+        </div>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="tabReg" class="active">Регистрация</button>
+        <button id="tabLogin">Вход</button>
+      </div>
+
+      <!-- Регистрация -->
+      <form class="auth-form" id="formReg" autocomplete="off">
+        <div class="auth-field">
+          <label for="regName">Имя</label>
+          <div class="in-wrap"><input id="regName" type="text" maxlength="32" placeholder="Как вас видят собеседники"></div>
+        </div>
+        <div class="auth-field">
+          <label for="regUser">Юзернейм — по нему вас найдут</label>
+          <div class="in-wrap"><span class="at">@</span><input id="regUser" type="text" maxlength="20" placeholder="nickname" spellcheck="false"></div>
+        </div>
+        <div class="auth-field">
+          <label for="regPass">Пароль</label>
+          <div class="in-wrap"><input id="regPass" type="password" maxlength="64" placeholder="Не менее 4 символов"></div>
+        </div>
+        <div class="auth-error" id="authError" hidden></div>
+        <button class="btn-primary" id="btnRegister" type="button">Создать аккаунт</button>
+        <p class="auth-note">Аккаунт хранится только на этом устройстве.<br>Юзернейм увидят собеседники в любом городе — поиск идёт через интернет.</p>
+      </form>
+
+      <!-- Вход -->
+      <form class="auth-form" id="formLogin" autocomplete="off" hidden>
+        <div class="auth-field">
+          <label for="logUser">Юзернейм</label>
+          <div class="in-wrap"><span class="at">@</span><input id="logUser" type="text" maxlength="20" placeholder="nickname" spellcheck="false"></div>
+        </div>
+        <div class="auth-field">
+          <label for="logPass">Пароль</label>
+          <div class="in-wrap"><input id="logPass" type="password" maxlength="64" placeholder="Ваш пароль"></div>
+        </div>
+        <div class="auth-error" id="authError2" hidden></div>
+        <button class="btn-primary" id="btnLogin" type="button">Войти</button>
+        <p class="auth-note">Вход проверяется по паролю этого устройства.</p>
+      </form>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       Ранняя проверка условий запуска — классический скрипт, работает даже
+       на file://, чтобы показать понятную ошибку до загрузки ES-модулей.
+       ===================================================================== -->
+  <script>
+    (function () {
+      var warn = document.getElementById('bootWarn');
+      var problems = [];
+      if (location.protocol === 'file:') {
+        problems.push(
+          'Страница открыта через <b>file://</b> — браузер запретит модули JS. ' +
+          'Запустите локальный сервер: в VS Code — правый клик → <b>Open with Live Server</b>, ' +
+          'либо <b>npx serve .</b> и откройте <b>http://localhost:3000</b>.'
+        );
+      }
+      if (!window.isSecureContext) {
+        problems.push(
+          'Страница открыта в <b>небезопасном контексте</b> — камера/микрофон будут заблокированы. ' +
+          'Используйте <b>http://localhost</b> или <b>https://</b>.'
+        );
+      }
+      if (problems.length) { warn.innerHTML = '⚠ ' + problems.join('<br>⚠ '); warn.hidden = false; }
+    })();
+  </script>
+
+  <!-- Точка входа приложения -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
