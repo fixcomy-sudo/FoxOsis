@@ -14,3 +14,4 @@ android/.cxx/
 ios/App/build/
 ios/App/Pods/
 desktop/release/
+dist/ipa-dl/

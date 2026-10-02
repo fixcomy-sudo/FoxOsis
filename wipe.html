@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Очистка локальных данных</title>
+<style>body{font:16px/1.5 system-ui;background:#0e1621;color:#e6edf3;padding:40px;max-width:560px}button{font-size:18px;padding:12px 24px;background:#2b5278;color:#fff;border:0;border-radius:10px;cursor:pointer}button:hover{background:#37628f}#r{margin-top:18px;color:#7ee787}</style></head>
+<body>
+<h1>Очистка локальных аккаунтов</h1>
+<p>Стирает профили, ключи, чаты и сессии этого сайта из вашего браузера (localStorage, sessionStorage, IndexedDB). Аккаунты в «облачке» (релеях) при этом остаются — вход по @имени и паролю продолжит работать.</p>
+<button onclick="wipe()">Стереть локальные данные</button>
+<div id="r"></div>
+<script>
+async function wipe () {
+  try {
+    localStorage.clear()
+    sessionStorage.clear()
+    const dbs = (await indexedDB.databases()) || []
+    for (const d of dbs) {
+      if (!d.name) continue
+      await new Promise((res) => {
+        const q = indexedDB.deleteDatabase(d.name)
+        q.onsuccess = q.onerror = q.onblocked = res
+      })
+    }
+    document.getElementById('r').textContent = 'Готово. Локальные данные стёрты — можно регистрироваться заново.'
+  } catch (e) {
+    document.getElementById('r').textContent = 'Ошибка: ' + e.message
+  }
+}
+</script>
+</body>
+</html>
