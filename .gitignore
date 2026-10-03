@@ -15,3 +15,7 @@ ios/App/build/
 ios/App/Pods/
 desktop/release/
 dist/ipa-dl/
+firebase-service-account.json
+google-services.json
+tg-config.json
+dist/*.exe

@@ -1,65 +1,64 @@
 {
-    "name":  "foxosis",
-    "version":  "1.0.0",
-    "description":  "",
-    "main":  "desktop/electron/main.cjs",
-    "scripts":  {
-                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1",
-                    "start":  "node server.js",
-                    "desktop":  "node desktop/make_assets.js \u0026\u0026 esbuild desktop/core.js --bundle --platform=node --format=cjs --outfile=desktop/out/core.cjs \u0026\u0026 electron desktop/electron/main.cjs",
-                    "dist:win":  "node desktop/make_assets.js \u0026\u0026 esbuild desktop/core.js --bundle --platform=node --format=cjs --outfile=desktop/out/core.cjs \u0026\u0026 electron-builder --win portable"
-                },
-    "repository":  {
-                       "type":  "git",
-                       "url":  "git+https://github.com/fixcomy-sudo/FoxOsis.git"
-                   },
-    "keywords":  [
-
-                 ],
-    "author":  "",
-    "license":  "ISC",
-    "type":  "commonjs",
-    "bugs":  {
-                 "url":  "https://github.com/fixcomy-sudo/FoxOsis/issues"
-             },
-    "homepage":  "https://github.com/fixcomy-sudo/FoxOsis#readme",
-    "dependencies":  {
-                         "@capacitor/android":  "8.5.2",
-                         "@capacitor/cli":  "8.5.2",
-                         "@capacitor/core":  "8.5.2",
-                         "@capacitor/ios":  "8.5.2"
-                     },
-    "devDependencies":  {
-                            "electron":  "^44.5.1",
-                            "electron-builder":  "^26.15.3",
-                            "esbuild":  "0.28.2"
-                        },
-    "build":  {
-                  "appId":  "com.foxosis.app",
-                  "productName":  "FoxOsis",
-                  "artifactName":  "FoxOsis.exe",
-                  "asar":  true,
-                  "directories":  {
-                                      "output":  "C:\\Users\\fixco\\AppData\\Local\\Temp\\foxosis-rel"
-                                  },
-                  "files":  [
-                                "desktop/electron/main.cjs",
-                                "desktop/electron/icon.png",
-                                "desktop/out/core.cjs"
-                            ],
-                  "win":  {
-                              "icon":  "desktop/electron/icon.png",
-                              "target":  [
-                                             {
-                                                 "target":  "portable",
-                                                 "arch":  [
-                                                              "x64"
-                                                          ]
-                                             }
-                                         ]
-                          },
-                  "portable":  {
-                                   "artifactName":  "FoxOsis.exe"
-                               }
-              }
+    "name": "foxosis",
+    "version": "1.0.0",
+    "description": "",
+    "main": "desktop/electron/main.cjs",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "start": "node server.js",
+        "desktop": "node desktop/make_assets.js && esbuild desktop/core.js --bundle --platform=node --format=cjs --outfile=desktop/out/core.cjs && electron desktop/electron/main.cjs",
+        "dist:win": "node desktop/make_assets.js && esbuild desktop/core.js --bundle --platform=node --format=cjs --outfile=desktop/out/core.cjs && electron-builder --win portable"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/fixcomy-sudo/FoxOsis.git"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "commonjs",
+    "bugs": {
+        "url": "https://github.com/fixcomy-sudo/FoxOsis/issues"
+    },
+    "homepage": "https://github.com/fixcomy-sudo/FoxOsis#readme",
+    "dependencies": {
+        "@capacitor/android": "8.5.2",
+        "@capacitor/cli": "8.5.2",
+        "@capacitor/core": "8.5.2",
+        "@capacitor/ios": "8.5.2",
+        "@capacitor/push-notifications": "^8.1.3"
+    },
+    "devDependencies": {
+        "electron": "^44.5.1",
+        "electron-builder": "^26.15.3",
+        "esbuild": "0.28.2"
+    },
+    "build": {
+        "appId": "com.foxosis.app",
+        "productName": "FoxOsis",
+        "artifactName": "FoxOsis.exe",
+        "asar": true,
+        "directories": {
+            "output": "C:\\Users\\fixco\\AppData\\Local\\Temp\\foxosis-rel"
+        },
+        "files": [
+            "desktop/electron/main.cjs",
+            "desktop/electron/icon.png",
+            "desktop/out/core.cjs"
+        ],
+        "win": {
+            "icon": "desktop/electron/icon.png",
+            "target": [
+                {
+                    "target": "portable",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ]
+        },
+        "portable": {
+            "artifactName": "FoxOsis.exe"
+        }
+    }
 }

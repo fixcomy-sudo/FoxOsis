@@ -538,6 +538,38 @@
       min-width: 0;
     }
     .composer input::placeholder { color: var(--text-3); }
+    .attach-btn {
+      width: 42px; height: 42px;
+      flex: 0 0 42px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: rgba(255,255,255,.92);
+      color: var(--text-2);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      transition: color .15s, border-color .15s, transform .12s;
+    }
+    .attach-btn svg { width: 20px; height: 20px; }
+    .attach-btn:hover { color: var(--accent); border-color: rgba(255,122,26,.5); transform: scale(1.05); }
+    .attach-btn:active { transform: scale(.95); }
+    .msg .att-img {
+      display: block; max-width: 260px; max-height: 320px;
+      border-radius: 12px; margin-bottom: 4px; cursor: pointer;
+      background: rgba(0,0,0,.06);
+    }
+    .msg .att-vid {
+      display: block; max-width: 260px; max-height: 320px;
+      border-radius: 12px; margin-bottom: 4px; background: #000;
+    }
+    .msg .att-file {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; margin-bottom: 4px;
+      border-radius: 10px; background: rgba(0,0,0,.07);
+      text-decoration: none; color: inherit; font-size: 14px;
+      max-width: 260px; word-break: break-all;
+    }
+    .msg.me .att-file { background: rgba(255,255,255,.18); }
+    .msg .att-file .fico { font-size: 18px; }
     .send-btn {
       width: 46px; height: 46px;
       flex: 0 0 46px;
@@ -724,8 +756,104 @@
       overflow-y: auto;
     }
     .modal-card h3 { margin: 0 0 4px; font-size: 19px; }
+    /* --- экран «Настройки» с вкладками --- */
+    .settings {
+      position: absolute; inset: 0; z-index: 55;
+      background: rgba(255,250,246,.6);
+      backdrop-filter: blur(12px);
+      display: flex; align-items: center; justify-content: center;
+      padding: 18px;
+    }
+    .settings[hidden] { display: none; }
+    .settings-card {
+      background: rgba(255,255,255,.94);
+      backdrop-filter: blur(30px) saturate(170%);
+      border: 1px solid var(--glass-brd);
+      border-radius: 24px;
+      padding: 20px 22px 22px;
+      width: 100%; max-width: 430px;
+      max-height: 90%; overflow-y: auto;
+      box-shadow: var(--glass-sh);
+      animation: pop .2s ease;
+    }
+    .settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .settings-head h3 { margin: 0; font-size: 19px; }
+    .settings-close {
+      width: 32px; height: 32px; border: 1px solid var(--line);
+      border-radius: 50%; background: #fff; color: var(--text-2);
+      font-size: 15px; cursor: pointer; line-height: 1;
+    }
+    .settings-close:hover { color: #e04a3a; border-color: rgba(224,74,58,.4); }
+    .settings-tabs {
+      display: flex; gap: 6px; padding: 4px;
+      background: rgba(0,0,0,.05); border-radius: 14px; margin-bottom: 16px;
+    }
+    .stab {
+      flex: 1; padding: 9px 6px; border: none; border-radius: 11px;
+      background: transparent; color: var(--text-2);
+      font-size: 13.5px; font-weight: 600; cursor: pointer;
+      transition: background .15s, color .15s, box-shadow .15s;
+    }
+    .stab.active {
+      background: #fff; color: var(--text);
+      box-shadow: 0 2px 8px rgba(70,35,5,.12);
+    }
+    .spanel { animation: fadeIn .18s ease; }
+    .set-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 2px; border-bottom: 1px solid var(--line);
+    }
+    .set-row:last-child { border-bottom: none; }
+    .set-txt { flex: 1; min-width: 0; }
+    .set-txt b { font-size: 14.5px; font-weight: 600; }
+    .set-hint { color: var(--text-3); font-size: 12.5px; line-height: 1.45; margin-top: 2px; word-break: break-word; }
+    .set-input { flex: 1; min-width: 0; background: rgba(255,255,255,.92); border: 1px solid var(--line); border-radius: 11px; color: var(--text); font-size: 14px; padding: 9px 12px; outline: none; transition: border-color .15s; }
+    .set-input:focus { border-color: #ff7a1a; }
+    .btn-mini {
+      flex: 0 0 auto; padding: 8px 14px;
+      border: 1px solid var(--line); border-radius: 11px;
+      background: #fff; color: var(--text);
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: border-color .15s, color .15s, transform .12s;
+    }
+    .btn-mini:hover { border-color: rgba(255,122,26,.5); color: var(--accent); transform: translateY(-1px); }
+    .btn-mini.on { background: var(--grad); border-color: transparent; color: #fff; }
+    .set-status { margin-top: 12px; font-size: 12.5px; color: var(--text-3); }
     .modal-card .sub { color: var(--text-2); font-size: 13.5px; margin: 0 0 18px; line-height: 1.5; }
     .modal-card .avatar { margin: 0 auto 16px; }
+    /* обложка профиля */
+    .profile-banner {
+      margin: -26px -28px 14px;
+      height: 108px;
+      background: var(--grad);
+      background-size: cover;
+      background-position: center;
+      border-radius: 24px 24px 16px 16px;
+      cursor: pointer;
+      position: relative;
+      box-shadow: inset 0 -50px 45px -35px rgba(0,0,0,.45);
+      transition: filter .15s;
+    }
+    .profile-banner:hover { filter: brightness(1.05); }
+    .profile-banner::after {
+      content: 'изменить обложку';
+      position: absolute; right: 12px; bottom: 9px;
+      font-size: 11px; color: rgba(255,255,255,.9);
+      background: rgba(0,0,0,.28); padding: 3px 8px; border-radius: 8px;
+      opacity: 0; transition: opacity .15s;
+    }
+    .profile-banner:hover::after { opacity: 1; }
+    /* email-код: поле + кнопка в ряд */
+    .code-wrap { display: flex; gap: 8px; align-items: center; }
+    .code-wrap input { flex: 1; min-width: 0; }
+    .code-btn {
+      flex: 0 0 auto; padding: 10px 12px;
+      border: 1px solid var(--line); border-radius: 12px;
+      background: #fff; color: var(--text);
+      font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .code-btn:hover { border-color: rgba(255,122,26,.5); color: var(--accent); }
+    .code-btn:disabled { opacity: .55; cursor: default; }
     .name-input {
       width: 100%;
       background: rgba(255,255,255,.92);
@@ -1137,6 +1265,10 @@
             <!-- человек -->
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-8 2-8 4.5V21h16v-2.5C20 16 16 14 12 14Z"/></svg>
           </button>
+          <button class="icon-btn" id="btnSettings" title="Настройки">
+            <!-- шестерёнка -->
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6a.5.5 0 0 0 .1-.6l-2-3.5a.5.5 0 0 0-.6-.2l-2.5 1a7.4 7.4 0 0 0-1.7-1l-.4-2.6a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.5a.5.5 0 0 0 .1.6L4.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6a.5.5 0 0 0-.1.6l2 3.5c.2.3.5.4.6.2l2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6c0 .3.2.4.5.4h4c.3 0 .5-.1.5-.4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1c.3.2.6.1.6-.2l2-3.5a.5.5 0 0 0-.1-.6L19.4 13ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"/></svg>
+          </button>
           <div class="side-title"><img src="./logo.jpeg" alt="" class="logo-img" onerror="this.remove()">FoxOsis</div>
           <button class="icon-btn" id="btnNewChat" title="Новый чат">
             <!-- карандаш -->
@@ -1239,6 +1371,11 @@
 
         <!-- Поле ввода -->
         <footer class="composer">
+          <button class="attach-btn" id="btnAttach" title="Прикрепить файл" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21.44 11.05 12.25 20.24a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"/></svg>
+          </button>
+          <input id="fileInput" type="file" hidden multiple
+                 accept="image/*,video/*,audio/*,.pdf,.zip,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx">
           <div class="field">
             <input id="msgInput" type="text" placeholder="Написать сообщение…" autocomplete="off">
           </div>
@@ -1289,12 +1426,17 @@
     <!-- Модальное окно: профиль (имя, peer id, журнал) -->
     <div class="modal" id="modal" hidden>
       <div class="modal-card">
+        <div class="profile-banner" id="profBanner" title="Нажмите, чтобы выбрать обложку профиля"></div>
+        <input type="file" id="bannerFile" accept="image/*" hidden>
         <h3 id="modalTitle">Профиль</h3>
         <p class="sub" id="modalSub">Имя видно собеседникам. Peer ID — технический идентификатор узла.</p>
         <div class="avatar big" id="modalAva" style="background:#ff7a1a;cursor:pointer" title="Нажмите, чтобы выбрать фото">?</div>
         <input type="file" id="avaFile" accept="image/*" hidden>
         <input class="name-input" id="nameInput" type="text" maxlength="32"
                placeholder="Ваше имя" autocomplete="off">
+        <input class="name-input" id="phoneInput" type="tel" maxlength="24"
+               placeholder="Телефон: +7 (999) 123-45-67" autocomplete="off"
+               title="Телефон нужен, чтобы вас находили по номеру">
         <div class="id-row">
           <div>
             <div class="id-label">Peer ID (для отладки)</div>
@@ -1308,6 +1450,78 @@
           <summary>Журнал событий</summary>
           <div id="log"></div>
         </details>
+      </div>
+    </div>
+
+    <!-- Экран «Настройки»: вкладки Профиль / Уведомления / О приложении -->
+    <div class="settings" id="settings" hidden>
+      <div class="settings-card">
+        <div class="settings-head">
+          <h3>Настройки</h3>
+          <button class="settings-close" id="btnSetClose" title="Закрыть" type="button">✕</button>
+        </div>
+        <div class="settings-tabs" id="settingsTabs">
+          <button class="stab active" data-tab="profile" type="button">Профиль</button>
+          <button class="stab" data-tab="notify" type="button">Уведомления</button>
+          <button class="stab" data-tab="about" type="button">О приложении</button>
+        </div>
+
+        <div class="spanel" id="spanelProfile">
+          <div class="set-row">
+            <div class="set-txt"><b>Имя и @юзернейм</b>
+              <div class="set-hint">Как вас видят собеседники — правится в профиле</div>
+            </div>
+            <button class="btn-mini" id="btnSetProfile" type="button">Открыть</button>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>@юзернейм</b><div class="set-hint" id="setUser">—</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>Peer ID</b><div class="set-hint" id="setPeer">—</div></div>
+            <button class="btn-mini" id="btnSetCopyId" type="button">Копировать</button>
+          </div>
+        </div>
+
+        <div class="spanel" id="spanelNotify" hidden>
+          <div class="set-row">
+            <div class="set-txt"><b>Push-уведомления</b>
+              <div class="set-hint">Звонки и сообщения приходят, даже когда мессенджер закрыт</div>
+            </div>
+            <button class="btn-mini" id="btnPushToggle" type="button">Включить</button>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>Тест-уведомление</b>
+              <div class="set-hint">Проверить, что система уведомлений работает</div>
+            </div>
+            <button class="btn-mini" id="btnPushTest" type="button">Показать</button>
+          </div>
+          <div class="set-status" id="pushStatus">Статус: не проверен</div>
+        </div>
+
+        <div class="spanel" id="spanelAbout" hidden>
+          <div class="set-row">
+            <div class="set-txt"><b>FoxOsis</b>
+              <div class="set-hint">версия <span id="setVer">2.0</span> · приватный P2P-мессенджер без серверов</div>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>Соединения</b><div class="set-hint" id="setConn">—</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>Сервер (коды по почте и пуш)</b>
+              <div class="set-hint">В телефоне — адрес твоего ПК, напр. http://192.168.1.7:8099 (узнать: ipconfig). Пусто = как страница (для ПК).</div>
+            </div>
+          </div>
+          <div class="set-row">
+            <input class="set-input" id="srvInput" type="url" placeholder="http://192.168.1.7:8099"
+                   autocomplete="off" spellcheck="false">
+            <button class="btn-mini" id="btnSrvSave" type="button">OK</button>
+          </div>
+          <div class="set-row">
+            <div class="set-txt"><b>Журнал событий</b><div class="set-hint">Техническая хроника — открывается в профиле</div></div>
+            <button class="btn-mini" id="btnSetLog" type="button">Открыть</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1369,6 +1583,17 @@
         <div class="auth-field">
           <label for="regPass">Пароль</label>
           <div class="in-wrap"><input id="regPass" type="password" maxlength="64" placeholder="Не менее 4 символов"></div>
+        </div>
+        <div class="auth-field">
+          <label for="regEmail">Email — подтверждение кодом (необязательно)</label>
+          <div class="in-wrap"><input id="regEmail" type="email" maxlength="80" placeholder="you@mail.ru (необязательно)"></div>
+        </div>
+        <div class="auth-field">
+          <label for="regCode">Код из письма</label>
+          <div class="in-wrap code-wrap">
+            <input id="regCode" type="text" inputmode="numeric" maxlength="6" placeholder="6 цифр">
+            <button class="code-btn" id="btnEmailCode" type="button">Получить код</button>
+          </div>
         </div>
         <div class="auth-error" id="authError" hidden></div>
         <button class="btn-primary" id="btnRegister" type="button">Создать аккаунт</button>

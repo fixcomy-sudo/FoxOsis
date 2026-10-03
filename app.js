@@ -61,10 +61,36 @@ import { multiaddr } from 'https://esm.sh/@multiformats/multiaddr@13.0.3'
 import { AbstractMultiaddrConnection } from 'https://esm.sh/@libp2p/utils@7.4.1'
 // schnorr (BIP-340) — подпись NIP-01 событий для публичных Nostr-релеев
 import { schnorr } from 'https://esm.sh/@noble/curves@1.4.0/secp256k1'
+// Android/iOS (Capacitor): FCM-пуш — единственный способ уведомлений,
+// когда приложение закрыто (WebView не умеет Web Push)
+import { PushNotifications } from '@capacitor/push-notifications'
 
 /** Глобальные символы libp2p (Symbol.for — они общие для всех копий библиотеки) */
 const transportSymbol = Symbol.for('@libp2p/transport')
 const serviceCapabilities = Symbol.for('@libp2p/service-capabilities')
+
+/* --------------------------------------------------------------------------
+ * ВЕРСИЯ и РАЗОВАЯ ОЧИСТКА localStorage.
+ * Новая ветка FoxOsis 2.0 стартует «с нуля»: при первом старте этой версии
+ * полностью стираем localStorage — старые профили, ключи и «фантомные»
+ * чаты прошлой версии не должны тянуться в чистое пространство foxosis/v2.
+ * Повторные запуски не очищаются (маркер foxosis/v = '2.0').
+ * -------------------------------------------------------------------------- */
+const APP_VERSION = '2.0'
+try {
+  if (typeof localStorage !== 'undefined' && localStorage.getItem('foxosis/v') !== APP_VERSION) {
+    // стираем ТОЛЬКО ключи FoxOsis — чужие данные того же origin (другие
+    // приложения/вкладки) трогать нельзя: clear() унёс бы и их
+    const doomed = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith('foxosis')) doomed.push(k)
+    }
+    for (const k of doomed) localStorage.removeItem(k)
+    localStorage.setItem('foxosis/v', APP_VERSION)
+    console.log('[FoxOsis] первые запуск 2.0 — хранилище FoxOsis очищено')
+  }
+} catch { /* приватный режим — очистка невозможна, продолжаем */ }
 
 /* -------------------------------------------------------------------------
  * Идентификатор «устройства» текущей вкладки.
@@ -194,7 +220,7 @@ const CFG = {
   LISTEN_ADDR: '/ip4/0.0.0.0/tcp/40217',
 
   // Локальный rendezvous: канал BroadcastChannel для поиска узлов одной машины
-  BC_CHANNEL: 'foxosis-rendezvous-v1',
+  BC_CHANNEL: 'foxosis-rendezvous-v2',
   // LAN-ретранслятор (server.js): WebSocket-путь для поиска МЕЖДУ устройствами
   WS_PATH: '/ws',
   HELLO_MS: 2500,      // период рассылки "я здесь" (мс)
@@ -207,7 +233,7 @@ const CFG = {
   AVA_QUALITY: 0.72,   // качество webp
 
   // Топик PubSub для демонстрации/расширения (общий эфир, комнаты)
-  TOPIC_PRESENCE: 'foxosis/presence',
+  TOPIC_PRESENCE: 'foxosis/v2/presence',
 
   // Ключи и данные в localStorage (разделены по вкладкам — см. INST_ID)
   KEY_STORAGE: instKey('key/v1'),
@@ -253,22 +279,27 @@ const CFG = {
   ],
 
   // Публичные Nostr-релеи — ГЛОБАЛЬНЫЙ сигнальный канал (вместо MQTT).
-  // Ищем собеседника по @юзернейму из любой точки мира без своего сервера:
-  // подписка REQ по тегу t = свой Peer ID, hello — в общий тег. Все релея
-  // держим ПАРАЛЛЕЛЬНО (дубли отсекает mid), при обрыве — свой backoff.
-  // Проверено вживую: полный круг NIP-01 (подпись → EVENT → приём подпиской)
-  // на всех трёх; 14 hello @2.5 с и burst офферов 8 @1.5 с — без провалов.
-  // Эфемерный kind 21337: релея ретранслируют, но НЕ хранят события —
-  // история не накапливается, повторная подписка чиста.
+  // 12 узлов: опрашиваются ВСЕ параллельно (Parallel Race — интерфейс
+  // активируется по ПЕРВОМу ответу, Promise.any-семантика), дубли отсекает
+  // mid, при обрыве — свой backoff. Последний быстрый релей кэшируется
+  // в localStorage['foxosis/lastRelay'] и ставится ПЕРВЫМ при следующем
+  // старте — мгновенный реконнект.
+  // Эфемерный kind 21337: релея ретранслируют, но НЕ хранят события.
   NOSTR_RELAYS: [
     'wss://relay.primal.net',
     'wss://nos.lol',
-    'wss://nostr.bitcoiner.social',
-    // запасные — пока один жив, вход/поиск работают
     'wss://relay.damus.io',
-    'wss://nostr.mom'
+    'wss://nostr.bitcoiner.social',
+    'wss://nostr.mom',
+    'wss://relay.nostr.band',
+    'wss://relay.snort.social',
+    'wss://nostr.zbd.gg',
+    'wss://nostr.wine',
+    'wss://relay.nos.today',
+    'wss://atlas.nostr.land',
+    'wss://nostr-relay.girino.xyz'
   ],
-  NOSTR_ROOT: 'foxosis/v1',    // корень тегов приложения
+  NOSTR_ROOT: 'foxosis/v2',    // корень тегов приложения (чистая ветка v2)
   NOSTR_KIND: 21337,           // эфемерный kind (20000–29999) — без хранения
   UNAME_KIND: 30078,           // адресный (d-тег) — релеи ХРАНЯТ: заявка @юзернейма
   // «Облако» аккаунта (Vault): шифрованное хранилище в тех же релеях
@@ -472,6 +503,8 @@ function colorFor (str) {
 }
 /** id сообщения */
 function rndId () { return (self.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)) }
+/** Лимит вложения в сообщении (байт в сжатом/исходном виде) */
+const FILE_LIMIT = 300 * 1024
 
 /** Показать на элементе-аватарке картинку (dataURL) или убрать её —
  *  тогда останется буквенно-цветная заглушка (letters+colorFor). */
@@ -482,6 +515,69 @@ function applyAva (el, avaUrl) {
     el.style.backgroundPosition = 'center'
   } else {
     el.style.backgroundImage = 'none'
+  }
+}
+
+/** Цифры телефона (без оформления) */
+function phoneDigits (v) { return String(v || '').replace(/\D/g, '') }
+
+/** Нормализация номера для сравнения/публикации: 8→7 в РФ-формате */
+function normPhone (v) {
+  let d = phoneDigits(v)
+  if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1)
+  if (d.length === 10 && ['9', '4', '3', '5'].includes(d[0])) d = '7' + d
+  return d
+}
+
+/** Оформление ввода телефона: +7 (999) 123-45-67 */
+function formatPhone (v) {
+  const raw = String(v || '')
+  const plus = raw.trim().startsWith('+')
+  let d = phoneDigits(raw)
+  if (d.length > 11) d = d.slice(0, 11)
+  if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1)
+  if (d.length > 1 && d[0] === '7') {
+    let out = '+7'
+    const r = d.slice(1)
+    if (r.length) out += ' (' + r.slice(0, 3)
+    if (r.length >= 3) out += ')'
+    if (r.length > 3) out += ' ' + r.slice(3, 6)
+    if (r.length > 6) out += '-' + r.slice(6, 8)
+    if (r.length > 8) out += '-' + r.slice(8, 10)
+    return out
+  }
+  return (plus ? '+' : '') + d
+}
+
+/** Сжать обложку профиля: широкий кроп 1200×400, ≤ 80 КБ в dataURL */
+async function compressBanner (file) {
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image()
+      i.onload = () => res(i)
+      i.onerror = () => rej(new Error('не удалось прочитать изображение'))
+      i.src = url
+    })
+    if (!img.width || !img.height) throw new Error('пустое изображение')
+    let best = ''
+    for (const [w, quality] of [[1200, 0.82], [1000, 0.75], [800, 0.7], [640, 0.65]]) {
+      const h = Math.round(w * 400 / 1200)
+      const canvas = document.createElement('canvas')
+      canvas.width = w; canvas.height = h
+      const ctx = canvas.getContext('2d')
+      // cover-кроп по центру
+      const scale = Math.max(w / img.width, h / img.height)
+      const sw = w / scale, sh = h / scale
+      ctx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, w, h)
+      let d = canvas.toDataURL('image/jpeg', quality)
+      if (!d.startsWith('data:image/jpeg')) d = canvas.toDataURL('image/webp', quality)
+      if (!best || d.length < best.length) best = d
+      if (d.length <= 80 * 1024) return d
+    }
+    return best
+  } finally {
+    URL.revokeObjectURL(url)
   }
 }
 
@@ -526,6 +622,18 @@ async function compressAva (file) {
 /* ==========================================================================
  * 3. Store — профиль и история чатов в localStorage («Недавние»)
  * ========================================================================== */
+
+/** Адрес сервера FoxOsis для /api/* (email-коды, push-форвард, fcm).
+ *  Браузер: origin страницы. Телефон (APK): адрес из Настройки → О
+ *  приложении → Сервер (иначе WebView отдаёт свой index.html вместо JSON). */
+function apiBase () {
+  let s = ''
+  try { s = String((Store && Store.data && Store.data.server) || '').trim() } catch {}
+  s = s.replace(/\/+$/, '')
+  if (/^https?:\/\/.+/.test(s)) return s
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) return location.origin
+  return 'http://localhost:8099'
+}
 
 const Store = {
   data: {
@@ -656,6 +764,12 @@ const Store = {
     this.save()
   },
 
+  /** Обложка профиля (dataURL). '' = градиентная заглушка. */
+  setProfileBanner (dataUrl) {
+    this.data.profile.banner = typeof dataUrl === 'string' ? dataUrl : ''
+    this.save()
+  },
+
   /** Аватар собеседника из входящего t:'ava'. Без чата — создаём запись. */
   setContactAva (peerId, dataUrl) {
     if (!peerId || typeof dataUrl !== 'string') return
@@ -715,7 +829,9 @@ const KeyStore = {
 
 const UI = {
   els: {},            // кэш getElementById
-  modalMode: null,    // 'welcome' | 'profile' | null
+    modalMode: null,    // 'welcome' | 'profile' | null
+    phoneHits: [],      // результаты поиска по телефону (Nostr)
+    phoneQ: '',         // уже отправленный цифровой запрос
   toastTimer: null,
 
   /* ---------- инициализация: кэшируем элементы, вешаем обработчики ------- */
@@ -727,12 +843,19 @@ const UI = {
       'codesPanel', 'codeBox', 'btnMakeCode', 'btnAcceptCode', 'btnCopyCode', 'btnClearCode',
       'chatEmpty', 'chatActive', 'btnBack', 'chatAva', 'chatName', 'chatStatus',
       'btnCallVoice', 'btnCallVideo', 'messages', 'msgInput', 'btnSend',
+      'btnAttach', 'fileInput',
       'callOverlay', 'remoteVideo', 'localVideo', 'callAvaBig', 'callName', 'callStatus', 'btnHangup',
       'incoming', 'incAva', 'incName', 'incType', 'btnAccept', 'btnDecline',
       'modal', 'modalTitle', 'modalSub', 'modalAva', 'nameInput', 'myId', 'btnCopyId', 'btnSaveName',
-      'btnLogout', 'avaFile',
+      'btnLogout', 'avaFile', 'profBanner', 'bannerFile', 'phoneInput',
+      'settings', 'btnSettings', 'btnSetClose', 'settingsTabs',
+      'spanelProfile', 'spanelNotify', 'spanelAbout',
+      'btnSetProfile', 'setUser', 'setPeer', 'btnSetCopyId',
+      'btnPushToggle', 'btnPushTest', 'pushStatus', 'setVer', 'setConn', 'btnSetLog',
+      'srvInput', 'btnSrvSave',
       'splash', 'btnEnter', 'auth', 'tabReg', 'tabLogin',
       'formReg', 'regName', 'regUser', 'regPass', 'btnRegister',
+      'regEmail', 'regCode', 'btnEmailCode',
       'formLogin', 'logUser', 'logPass', 'btnLogin',
       'authError', 'authError2',
       'toast'
@@ -745,6 +868,7 @@ const UI = {
     e.tabReg.onclick = () => Auth.tab('reg')
     e.tabLogin.onclick = () => Auth.tab('login')
     e.btnRegister.onclick = () => Auth.register()
+    if (e.btnEmailCode) e.btnEmailCode.onclick = () => Auth.sendEmailCode()
     e.btnLogin.onclick = () => Auth.login()
     e.regUser.oninput = () => { e.regUser.value = e.regUser.value.toLowerCase().replace(/[^a-z0-9_]/g, '') }
     e.logUser.oninput = () => { e.logUser.value = e.logUser.value.toLowerCase().replace(/[^a-z0-9_]/g, '') }
@@ -754,9 +878,31 @@ const UI = {
 
     // --- шапка левой колонки ---
     e.btnProfile.onclick = () => this.showModal('profile')
+    // --- настройки: вкладки Профиль / Уведомления / О приложении ---
+    if (e.btnSettings) e.btnSettings.onclick = () => this.showSettings()
+    if (e.btnSetClose) e.btnSetClose.onclick = () => { e.settings.hidden = true }
+    if (e.settingsTabs) e.settingsTabs.onclick = (ev) => {
+      const b = ev.target.closest('.stab')
+      if (b) this.settingsTab(b.dataset.tab)
+    }
+    if (e.btnSetProfile) e.btnSetProfile.onclick = () => { e.settings.hidden = true; this.showModal('profile') }
+    if (e.btnSetCopyId) e.btnSetCopyId.onclick = () =>
+      this.copyText(App.node ? App.node.peerId.toString() : '', 'Peer ID скопирован')
+    if (e.btnPushToggle) e.btnPushToggle.onclick = () => this.togglePush()
+    if (e.btnPushTest) e.btnPushTest.onclick = () => {
+      Push.notify('FoxOsis', 'Тест: уведомления работают!', 'msg')
+      this.toast('Тест-уведомление отправлено')
+    }
+    if (e.btnSetLog) e.btnSetLog.onclick = () => {
+      e.settings.hidden = true
+      this.showModal('profile')
+      const d = document.querySelector('.modal-log')
+      if (d) d.open = true
+    }
+    if (e.btnSrvSave) e.btnSrvSave.onclick = () => this.saveServer()
     e.btnNewChat.onclick = () => this.showSide('new')
     e.btnBackList.onclick = () => this.showSide('list')
-    e.searchInput.oninput = () => this.renderChatList()
+    e.searchInput.oninput = () => { this.renderChatList(); this.maybePhoneSearch() }
     if (e.netStatus) e.netStatus.onclick = () => this.showModal('profile')
 
     // --- Android WebView: глушим длинное нажатие (меню «Копировать/
@@ -784,6 +930,12 @@ const UI = {
     e.btnBack.onclick = () => document.body.classList.remove('chat-open')
     e.btnSend.onclick = () => this._sendFromInput()
     e.msgInput.onkeydown = (ev) => { if (ev.key === 'Enter') this._sendFromInput() }
+    if (e.btnAttach) e.btnAttach.onclick = () => e.fileInput.click()
+    if (e.fileInput) e.fileInput.onchange = () => {
+      const files = Array.from(e.fileInput.files || [])
+      e.fileInput.value = ''
+      if (files.length) this.sendFiles(files)
+    }
 
     // --- звонки ---
     e.btnCallVoice.onclick = () => Call.start('voice')
@@ -805,6 +957,15 @@ const UI = {
     e.nameInput.onkeydown = (ev) => { if (ev.key === 'Enter') this.saveName() }
     // аватар: клик по картинке → выбор файла → сжатие → рассылка окружению
     e.modalAva.onclick = () => this.pickAvatar()
+    if (e.profBanner) e.profBanner.onclick = () => e.bannerFile.click()
+    if (e.bannerFile) e.bannerFile.onchange = () => {
+      const f = e.bannerFile.files && e.bannerFile.files[0]
+      e.bannerFile.value = ''
+      if (f) this.onBannerFile(f)
+    }
+    if (e.phoneInput) e.phoneInput.oninput = () => {
+      e.phoneInput.value = formatPhone(e.phoneInput.value)
+    }
     e.avaFile.onchange = () => {
       const f = e.avaFile.files && e.avaFile.files[0]
       e.avaFile.value = '' // сброс, чтобы тот же файл можно было выбрать снова
@@ -813,6 +974,7 @@ const UI = {
     e.modal.onclick = (ev) => {
       // закрыть по клику вне карточки можно только в режиме профиля
       if (this.modalMode === 'profile' && ev.target === e.modal) this.hideModal()
+      else if (e.settings && ev.target === e.settings) e.settings.hidden = true
     }
   },
 
@@ -823,6 +985,61 @@ const UI = {
     // именно sendChatText (сохранение, доставка, галочки), а не Channel.send:
     // у Channel.send первый аргумент — это peerId, а не текст
     sendChatText(text).catch(e => log('ошибка отправки: ' + e.message, 'err'))
+  },
+
+  /** Отправка прикреплённых файлов: изображения сжимаем, остальное — в пределах лимита */
+  async sendFiles (files) {
+    if (!App.currentPeer) { this.toast('Сначала выберите чат'); return }
+    for (const f of files.slice(0, 6)) {
+      try {
+        let data = null
+        if (f.type.startsWith('image/')) data = await this._shrinkImage(f)
+        else if (f.size <= FILE_LIMIT) data = await this._readDataUrl(f)
+        if (!data) { this.toast(`${f.name}: файл больше 300 КБ`); continue }
+        await sendChatFile({
+          name: (f.name || 'файл').slice(0, 80),
+          mime: f.type || 'application/octet-stream',
+          data
+        })
+      } catch (e) {
+        log('вложение: ' + e.message, 'err')
+        this.toast('Не удалось отправить ' + f.name)
+      }
+    }
+  },
+
+  _readDataUrl (file) {
+    return new Promise((res, rej) => {
+      const r = new FileReader()
+      r.onload = () => res(String(r.result))
+      r.onerror = () => rej(r.error || new Error('чтение файла'))
+      r.readAsDataURL(file)
+    })
+  },
+
+  /** Сжать изображение (до 1000px, JPEG) так, чтобы влезло в лимит вложения */
+  async _shrinkImage (file) {
+    const img = await new Promise((res, rej) => {
+      const url = URL.createObjectURL(file)
+      const i = new Image()
+      i.onload = () => { URL.revokeObjectURL(url); res(i) }
+      i.onerror = () => { URL.revokeObjectURL(url); rej(new Error('не удалось открыть изображение')) }
+      i.src = url
+    })
+    let scale = Math.min(1, 1000 / Math.max(img.width, img.height, 1))
+    let quality = 0.82
+    for (let i = 0; i < 4; i++) {
+      const c = document.createElement('canvas')
+      c.width = Math.max(1, Math.round(img.width * scale))
+      c.height = Math.max(1, Math.round(img.height * scale))
+      const ctx = c.getContext('2d')
+      ctx.drawImage(img, 0, 0, c.width, c.height)
+      const out = c.toDataURL('image/jpeg', quality)
+      if (out.length * 0.75 <= FILE_LIMIT) return out
+      scale *= 0.7
+      quality = Math.max(0.5, quality - 0.1)
+    }
+    return null
   },
 
   /* ---------- переключение режимов левой колонки ----------------------- */
@@ -862,6 +1079,14 @@ const UI = {
         if (!hit) continue
         seen.add(p.peerId)
         rows.push({ peerId: p.peerId, chat: null, presence: p })
+      }
+      // 2б) поиск по телефону: цифровой запрос нашёл публикации в Nostr
+      if (this.phoneHits.length && this.phoneQ === normPhone(e.searchInput.value)) {
+        for (const h of this.phoneHits) {
+          if (seen.has(h.peerId)) continue
+          seen.add(h.peerId)
+          rows.push({ peerId: h.peerId, chat: null, presence: { name: h.name, username: h.username, peerId: h.peerId } })
+        }
       }
     }
 
@@ -1111,21 +1336,23 @@ const UI = {
   },
 
   /* ---------- лента сообщений ------------------------------------------ */
-  /** Полная перерисовка ленты текущего чата */
+  /** Полная перерисовка ленты текущего чата.
+   *  Строим во фрагменте и подменяем разом — без «мёртвого» пустого кадра,
+   *  поэтому вкладка не мигает белым при открытии чата. */
   renderMessages () {
     const peer = App.currentPeer
     const box = this.els.messages
-    box.innerHTML = ''
-    if (!peer) return
+    if (!peer || !Store.data.chats[peer]) { box.innerHTML = ''; return }
     const chat = Store.data.chats[peer]
-    if (!chat) return
 
+    const frag = document.createDocumentFragment()
     let lastDay = null
     for (const msg of chat.messages) {
       const dk = dayKey(msg.ts)
-      if (dk !== lastDay) { box.appendChild(this._daySeparator(msg.ts)); lastDay = dk }
-      box.appendChild(this._bubble(peer, msg))
+      if (dk !== lastDay) { frag.appendChild(this._daySeparator(msg.ts)); lastDay = dk }
+      frag.appendChild(this._bubble(peer, msg))
     }
+    box.replaceChildren(frag)
     box.scrollTop = box.scrollHeight
   },
 
@@ -1160,6 +1387,42 @@ const UI = {
     const bubble = document.createElement('div')
     bubble.className = 'bubble'
 
+    // вложение: картинка кликом открывается, видео — плеер, остальное — ссылка-скачать
+    if (msg.file && msg.file.data) {
+      const f = msg.file
+      const mime = String(f.mime || '')
+      if (mime.startsWith('image/')) {
+        const img = document.createElement('img')
+        img.className = 'att-img'
+        img.src = f.data
+        img.alt = f.name || ''
+        img.loading = 'lazy'
+        img.onclick = () => window.open(f.data, '_blank')
+        bubble.appendChild(img)
+      } else if (mime.startsWith('video/')) {
+        const v = document.createElement('video')
+        v.className = 'att-vid'
+        v.src = f.data
+        v.controls = true
+        v.playsInline = true
+        bubble.appendChild(v)
+      } else {
+        const a = document.createElement('a')
+        a.className = 'att-file'
+        a.href = f.data
+        a.download = f.name || 'file'
+        a.target = '_blank'
+        a.rel = 'noopener'
+        const ico = document.createElement('span')
+        ico.className = 'fico'
+        ico.textContent = mime.startsWith('audio/') ? '🎵' : '📄'
+        const nm = document.createElement('span')
+        nm.textContent = f.name || 'файл'
+        a.append(ico, nm)
+        bubble.appendChild(a)
+      }
+    }
+
     const text = document.createElement('span')
     text.className = 'text'
     text.textContent = msg.text
@@ -1175,14 +1438,27 @@ const UI = {
       meta.appendChild(tick)
     }
 
-    bubble.append(text, meta)
+    if (!msg.file) bubble.appendChild(text)
+    bubble.appendChild(meta)
     wrap.appendChild(bubble)
     return wrap
   },
 
-  /** Обновить галочки у сообщений (после доставки/прочтения) */
+  /** Обновить галочки у сообщений (после доставки/прочтения).
+   *  Точечно, без полной перерисовки — лента не мигает на каждой отметке. */
   refreshMeta (peer) {
-    if (peer === App.currentPeer) this.renderMessages()
+    if (peer !== App.currentPeer) { this.renderChatList(); return }
+    const chat = Store.data.chats[peer]
+    if (!chat) { this.renderChatList(); return }
+    const box = this.els.messages
+    const want = new Map()
+    for (const m of chat.messages) if (m.side === 'me') want.set(m.id, !m.delivered ? '' : (m.read ? '✓✓' : '✓'))
+    for (const el of box.querySelectorAll('.msg.me')) {
+      const tick = el.querySelector('.tick')
+      if (!tick) continue
+      const wantTick = want.get(el.dataset.id)
+      if (wantTick !== undefined && tick.textContent !== wantTick) tick.textContent = wantTick
+    }
     this.renderChatList()
   },
 
@@ -1217,6 +1493,78 @@ const UI = {
   hideIncoming () { this.els.incoming.hidden = true },
 
   /* ---------- модалка (имя / профиль) ---------------------------------- */
+  /* ---------- настройки (вкладки) --------------------------------------- */
+  showSettings (tab) {
+    const e = this.els
+    if (!e.settings) return
+    e.settings.hidden = false
+    e.setUser.textContent = Store.data.profile.username ? '@' + Store.data.profile.username : '—'
+    e.setPeer.textContent = App.node ? App.node.peerId.toString() : 'генерация…'
+    e.setVer.textContent = typeof APP_VERSION !== 'undefined' ? APP_VERSION : '2.0'
+    if (e.srvInput) e.srvInput.value = Store.data.server || ''
+    this.settingsTab(tab || 'profile')
+  },
+
+  /** Сохранить адрес сервера (нужен телефону: коды по почте и /api/fcm) */
+  saveServer () {
+    const e = this.els
+    if (!e.srvInput) return
+    let v = (e.srvInput.value || '').trim().replace(/\/+$/, '')
+    if (v && !/^https?:\/\/.+/.test(v)) {
+      this.toast('Адрес должен начинаться с http:// или https://')
+      return
+    }
+    Store.data.server = v
+    const ok = Store.save()
+    this.toast(!ok
+      ? 'Сохранено, но браузер запретил запись — пропадёт при перезагрузке'
+      : (v ? 'Сервер: ' + v : 'Сервер: по умолчанию (как страница)'))
+    log('server base: ' + apiBase(), 'sys')
+  },
+
+  settingsTab (name) {
+    const e = this.els
+    for (const b of e.settingsTabs.querySelectorAll('.stab')) {
+      b.classList.toggle('active', b.dataset.tab === name)
+    }
+    e.spanelProfile.hidden = name !== 'profile'
+    e.spanelNotify.hidden = name !== 'notify'
+    e.spanelAbout.hidden = name !== 'about'
+    if (name === 'notify') this.refreshNotifyStatus()
+    if (name === 'about') {
+      const rel = NostrRendezvous.relays ? NostrRendezvous.relays.length : 0
+      const online = Rendezvous.onlinePeers ? Rendezvous.onlinePeers().length : 0
+      e.setConn.textContent = `релеев: ${rel} · собеседников в сети: ${online} · p2p-соединений: ${connectedPeers().length}`
+    }
+  },
+
+  async refreshNotifyStatus () {
+    const e = this.els
+    if (!e.pushStatus) return
+    const supported = 'Notification' in window
+    const perm = supported ? Notification.permission : 'unsupported'
+    const active = await Push.isActive()
+    e.pushStatus.textContent = 'Статус: ' + (
+      !supported ? 'браузер не поддерживает уведомления'
+        : perm !== 'granted' ? 'нет разрешения (' + perm + ')'
+          : active ? 'подписка активна — уведомления приходят' : 'разрешение есть, подписка не создана'
+    )
+    e.btnPushToggle.textContent = active ? 'Выключить' : 'Включить'
+    e.btnPushToggle.classList.toggle('on', active)
+  },
+
+  async togglePush () {
+    const active = await Push.isActive()
+    if (active) {
+      await Push.disable()
+      this.toast('Уведомления выключены')
+    } else {
+      const ok = await Push.enable()
+      this.toast(ok ? 'Уведомления включены' : 'Не удалось включить уведомления')
+    }
+    await this.refreshNotifyStatus()
+  },
+
   showModal (mode) {
     this.modalMode = mode
     const e = this.els
@@ -1224,6 +1572,12 @@ const UI = {
     e.modalSub.textContent = 'Имя видно собеседникам. Peer ID — технический идентификатор узла.'
     e.btnSaveName.textContent = 'Сохранить'
     e.nameInput.value = Store.data.profile.name || ''
+    if (e.phoneInput) e.phoneInput.value = Store.data.profile.phone ? formatPhone(Store.data.profile.phone) : ''
+    if (e.profBanner) {
+      const bn = Store.data.profile.banner
+      if (bn) applyAva(e.profBanner, bn)
+      else e.profBanner.style.backgroundImage = '' // вернуть градиент из CSS
+    }
     e.myId.textContent = App.node ? App.node.peerId.toString() : 'генерация…'
     this._updateModalAvatar()
     e.modal.hidden = false
@@ -1265,12 +1619,67 @@ const UI = {
   saveName () {
     const name = this.els.nameInput.value.trim() || 'Гость'
     Store.setProfileName(name)
+    // телефон: сохраняем и публикуем для поиска по номеру
+    const phone = this.els.phoneInput ? normPhone(this.els.phoneInput.value) : ''
+    if (phone && phone.length < 10) {
+      this.toast('Телефон слишком короткий — не сохранён')
+    } else {
+      Store.data.profile.phone = phone
+      Store.save()
+      if (this.els.phoneInput) this.els.phoneInput.value = phone ? formatPhone(phone) : ''
+      if (phone.length >= 10) Push.publishPhone().catch(() => {})
+    }
     this.els.modal.hidden = true
     this.modalMode = null
     this.renderChatList()
     Presence.announce() // сообщить своё имя окружению
     this.toast(`Имя сохранено: ${name}`)
     log(`имя профиля: ${name}`, 'ok')
+  },
+
+  /** Обложка профиля: выбрать фото, сжать, сохранить */
+  async onBannerFile (file) {
+    if (!file) return
+    if (!/^image\//.test(file.type)) { this.toast('Нужен файл изображения'); return }
+    try {
+      const d = await compressBanner(file)
+      Store.setProfileBanner(d)
+      applyAva(this.els.profBanner, d)
+      this.toast('Обложка обновлена')
+      log('обложка профиля обновлена (' + Math.round(d.length / 1024) + ' КБ)', 'ok')
+    } catch (e) {
+      this.toast('Не удалось обработать фото: ' + e.message)
+      log('обложка: ' + e.message, 'err')
+    }
+  },
+
+  /** Поиск по телефону: цифровой запрос → публикации phone в Nostr */
+  async maybePhoneSearch () {
+    const q = normPhone(this.els.searchInput.value)
+    if (q.length < 7) {
+      if (this.phoneQ) { this.phoneQ = ''; this.phoneHits = [] }
+      return
+    }
+    if (q === this.phoneQ) return
+    this.phoneQ = q
+    let evs = []
+    try {
+      evs = await NostrRendezvous.reqEvents(
+        { kinds: [CFG.UNAME_KIND], '#d': [CFG.NOSTR_ROOT + '/phone/' + q], limit: 5 }, 3000)
+    } catch { return }
+    if (q !== this.phoneQ) return
+    const hits = []
+    for (const ev of evs) {
+      try {
+        const c = JSON.parse(ev.content)
+        if (c && c.from && (c.username || c.name)) {
+          hits.push({ peerId: c.from, name: String(c.name || ''), username: String(c.username || '') })
+        }
+      } catch { /* битая запись */ }
+    }
+    this.phoneHits = hits
+    if (hits.length) log(`поиск по телефону: найдено ${hits.length}`, 'ok')
+    this.renderChatList()
   },
 
   /* ---------- мелочи ---------------------------------------------------- */
@@ -1750,6 +2159,64 @@ const Auth = {
   },
 
   /** Регистрация: имя + @юзернейм + пароль */
+  _apiBase () { return apiBase() },
+
+  /** Запросить код подтверждения email (POST /api/email/code) */
+  async sendEmailCode () {
+    const e = this.els
+    const email = (e.regEmail.value || '').trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[a-zа-я]{2,}$/i.test(email)) { this._err('Введите корректный email.', 'reg'); return }
+    if (Push.native() && !String(Store.data.server || '').trim()) {
+      this._err('На телефоне укажи адрес сервера: Настройки ⚙ → О приложении → Сервер (http://IP-ПК:8099).', 'reg')
+      return
+    }
+    this._err(null, 'reg')
+    const btn = e.btnEmailCode
+    const txt = btn.textContent
+    btn.disabled = true
+    btn.textContent = 'Отправляем…'
+    try {
+      const r = await fetch(this._apiBase() + '/api/email/code', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      })
+      const d = await r.json().catch(() => null)
+      if (!d || !d.ok) throw new Error((d && d.err) || ('сервер ответил не тем (HTTP ' + r.status + ') — проверь адрес сервера в настройках'))
+      // dev-режим (без SMTP): сервер вернул код — показываем его сразу
+      if (d.dev && d.code) {
+        e.regCode.value = d.code
+        this._err(null, 'reg')
+        log('email-код (dev): ' + d.code, 'sys')
+      }
+      this.toast(d.dev ? 'Код показан в поле (dev без SMTP)' : 'Код отправлен на почту')
+    } catch (ex) {
+      this._err('Не удалось получить код: ' + ex.message, 'reg')
+    } finally {
+      btn.disabled = false
+      btn.textContent = txt
+    }
+  },
+
+  /** Проверить код у сервера (POST /api/email/verify) */
+  async verifyEmail (email, code) {
+    try {
+      if (Push.native() && !String(Store.data.server || '').trim()) {
+        this._err('Укажи адрес сервера: Настройки ⚙ → О приложении → Сервер.', 'reg')
+        return false
+      }
+      const r = await fetch(this._apiBase() + '/api/email/verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code })
+      })
+      const d = await r.json().catch(() => null)
+      if (!d || !d.ok) { this._err((d && d.err) || 'Неверный код.', 'reg'); return false }
+      return true
+    } catch (ex) {
+      this._err('Не удалось проверить код: ' + ex.message, 'reg')
+      return false
+    }
+  },
+
   async register () {
     const e = this.els
     this._err(null, 'reg')
@@ -1762,6 +2229,24 @@ const Auth = {
       return this._err('Юзернейм: 3–20 символов — латиница, цифры и «_».', 'reg')
     }
     if (pass.length < 4) return this._err('Пароль должен быть не короче 4 символов.', 'reg')
+
+    // email — полностью опционально: если код не введён или не подошёл,
+    // регистрация всё равно идёт (без почты), а не блокируется
+    const email = (e.regEmail.value || '').trim().toLowerCase()
+    if (email) {
+      const code = (e.regCode.value || '').trim()
+      let okEmail = false
+      if (/^[^\s@]+@[^\s@]+\.[a-zа-я]{2,}$/i.test(email) && /^\d{6}$/.test(code)) {
+        okEmail = await this.verifyEmail(email, code)
+      }
+      if (okEmail) {
+        Store.data.profile.email = email
+        Store.save()
+      } else {
+        this.toast('Email не подтверждён — регистрируемся без почты')
+        log('email пропущен (код не подтверждён): ' + email, 'sys')
+      }
+    }
 
     const passHash = await this.hash(pass)
 
@@ -1914,6 +2399,7 @@ const Auth = {
     UI.renderChatList()
     UI.toast(`Вы вошли как @${Store.data.profile.username}`)
     log(`авторизация: @${Store.data.profile.username} (${Store.data.profile.name})`, 'ok')
+    Push.enable().catch(() => {})  // включаем push-уведомления (разрешение + подписка)
   },
 
   /** Выход из аккаунта (профиль остаётся — можно войти снова) */
@@ -2824,6 +3310,59 @@ const NostrRendezvous = {
         } catch { /* сокет умер — таймер даст 'free' */ }
       }
     })
+  },
+
+  /** Прямая публикация готового события (EVENT) во все живые сокеты */
+  publishRaw (ev) {
+    const frame = JSON.stringify(['EVENT', ev])
+    let sent = 0
+    const now = Date.now()
+    for (const r of this.relays) {
+      if (r.ws && r.ws.readyState === 1 && (r.mutedUntil || 0) < now) {
+        try { r.ws.send(frame); sent++ } catch { /* сокет умер */ }
+      }
+    }
+    return sent
+  },
+
+  /** Точечный REQ к живым релеям: собирает события по фильтру (для
+   *  push-подписок), закрывает подписку по EOSE всех сокетов или таймауту. */
+  reqEvents (filter, ms = 4000) {
+    return new Promise((resolve) => {
+      const socks = this.relays.filter((r) => r.ws && r.ws.readyState === 1)
+      if (!socks.length) return resolve([])
+      const sub = 'foxosis-q-' + rndId()
+      const out = new Map()
+      const handlers = new Map()
+      let done = false
+      let eoses = 0
+      const finish = () => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        for (const r of socks) {
+          const h = handlers.get(r)
+          if (h) { try { r.ws.removeEventListener('message', h) } catch {} }
+          try { if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify(['CLOSE', sub])) } catch {}
+        }
+        resolve([...out.values()])
+      }
+      const timer = setTimeout(finish, ms)
+      for (const r of socks) {
+        const h = (ev) => {
+          let f
+          try { f = JSON.parse(ev.data) } catch { return }
+          if (!Array.isArray(f) || f[1] !== sub) return
+          if (f[0] === 'EVENT' && f[2] && f[2].id) out.set(f[2].id, f[2])
+          else if (f[0] === 'EOSE') { eoses++; if (eoses >= socks.length) finish() }
+        }
+        handlers.set(r, h)
+        try {
+          r.ws.addEventListener('message', h)
+          r.ws.send(JSON.stringify(['REQ', sub, filter]))
+        } catch { /* сокет умер — таймер завершит */ }
+      }
+    })
   }
 }
 
@@ -3433,6 +3972,12 @@ function onChatMessage (peerStr, msg) {
         delivered: true,
         read: false
       }
+      // вложение (сжатая картинка/файл) — с проверкой лимита, чтобы
+      // чужой огромный payload не забил локальное хранилище
+      if (msg.file && typeof msg.file === 'object' &&
+          typeof msg.file.data === 'string' && msg.file.data.length <= 600 * 1024) {
+        rec.file = { name: String(msg.file.name || 'файл').slice(0, 80), mime: String(msg.file.mime || ''), data: msg.file.data }
+      }
       Store.appendMessage(peerStr, rec)
 
       const isOpen = App.currentPeer === peerStr
@@ -3443,11 +3988,17 @@ function onChatMessage (peerStr, msg) {
         UI.renderChatList()
         // подтверждаем прочтение — отправитель увидит ✓✓
         Chat.send(peerStr, { k: 'read', id: rec.id }).catch(() => {})
+        if (document.hidden) Push.notify('FoxOsis', `${chat.name}: ${rec.text.slice(0, 120)}`, 'msg')
       } else {
         chat.unread = (chat.unread || 0) + 1
         Store.save()
         UI.renderChatList()
         UI.toast(`${chat.name}: ${rec.text}`)
+        if (document.hidden) Push.notify('FoxOsis', `${chat.name}: ${rec.text.slice(0, 120)}`, 'msg')
+        // приложение собеседника могло закрыться — пушем, чтобы открыл
+        if (!isConnectedTo(peerStr) && chat.username) {
+          Push.sendPush(chat.username, 'msg', 'FoxOsis', `${chat.name || chat.username}: ${rec.text.slice(0, 100)}`).catch(() => {})
+        }
       }
       break
     }
@@ -3503,10 +4054,31 @@ async function sendChatText (text) {
   await tryDeliver(peer, msg)
 }
 
+/** Отправка вложения: сохраняем, показываем в ленте, доставляем */
+async function sendChatFile (file) {
+  const peer = App.currentPeer
+  if (!peer) { UI.toast('Сначала выберите чат'); return }
+  const msg = {
+    id: rndId(),
+    side: 'me',
+    text: '📎 ' + file.name,
+    ts: Date.now(),
+    delivered: false,
+    read: false,
+    file
+  }
+  Store.appendMessage(peer, msg)
+  UI.appendMessageToView(peer, msg)
+  UI.renderChatList()
+  await tryDeliver(peer, msg)
+}
+
 /** Доставка одного сообщения: если нет соединения — попробовать подключиться */
 async function tryDeliver (peer, msg) {
   const doSend = async () => {
-    await Chat.send(peer, { k: 'msg', id: msg.id, text: msg.text, ts: msg.ts })
+    const payload = { k: 'msg', id: msg.id, text: msg.text, ts: msg.ts }
+    if (msg.file) payload.file = msg.file
+    await Chat.send(peer, payload)
     msg.delivered = true
     Store.save()
     UI.refreshMeta(peer)
@@ -3526,6 +4098,13 @@ async function tryDeliver (peer, msg) {
     }
   } else {
     UI.toast('Собеседник не в сети — сообщение отправится при появлении')
+    // пуш собеседнику: он увидит уведомление и откроет приложение,
+    // недоставленные сообщения уйдут автоматически при появлении связи
+    const chat = Store.data.chats[peer]
+    if (chat && chat.username) {
+      Push.sendPush(chat.username, 'msg', 'FoxOsis',
+        `${chat.name || chat.username}: ${msg.text.slice(0, 100)}`).catch(() => {})
+    }
   }
 }
 
@@ -3611,6 +4190,457 @@ const Presence = {
 }
 
 /* ==========================================================================
+ * 12.5 Push — Web Push (VAPID, RFC 8291 aes128gcm): уведомления приложения
+ *     при ЗАКРЫТОЙ вкладке. Подписка лежит в Nostr (d='foxosis/v2/push/<ник>'),
+ *     отправитель шлёт зашифрованный пуш напрямую в push-сервис браузера,
+ *     Service Worker (sw.js) показывает уведомление ОС с кнопками
+ *     «Принять / Сбросить» для входящих звонков.
+ * ========================================================================== */
+const Push = {
+  // VAPID-пара приложения (в serverless-режиме ключ лежит в клиенте)
+  VAPID_PUB: 'BMxwFCa1S1V_LSkL5a_aFdCcdHQ83_Y3jsx7aSXkHrr4AYCrn2bZIPjKV9G_h-Uykm5CGeOnYr0PXxHOY23IdXU',
+  VAPID_PRIV: 'eOUkGd7TRzf3oFz69CAwRA70cUkZH2wDiv7s_a68CC8',
+  reg: null,
+  enabled: false,
+  fcmToken: '',   // токен FCM (нативное приложение Android/iOS)
+
+  /** Нативная платформа (Capacitor APK/IPA)? */
+  native () {
+    try {
+      return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' &&
+        window.Capacitor.isNativePlatform())
+    } catch { return false }
+  },
+
+  /** Зарегистрировать Service Worker (старт приложения) */
+  async start () {
+    if (!('serviceWorker' in navigator)) return false
+    try {
+      this.reg = await navigator.serviceWorker.register('./sw.js')
+      log('service worker: push готов', 'sys')
+      return true
+    } catch (e) {
+      log('sw: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Полное включение: разрешение → подписка → публикация в Nostr */
+  async enable () {
+    try {
+      if (this.native()) return await this._enableNative()
+      if (!this.reg) await this.start()
+      if (!this.reg || !('PushManager' in window) || typeof Notification === 'undefined') return false
+      let perm = Notification.permission
+      if (perm === 'default') perm = await Notification.requestPermission()
+      if (perm !== 'granted') {
+        log('push: уведомления запрещены пользователем', 'warn')
+        return false
+      }
+      await this.reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: this.VAPID_PUB
+      })
+      this.enabled = true
+      // Nostr-сокеты поднимаются параллельно — публикуем подписку с паузами
+      setTimeout(() => this.publishSub(), 3000)
+      setTimeout(() => this.publishSub(), 10000)
+      setTimeout(() => this.publishSub(), 30000)
+      // телефон — для поиска по номеру (публикуется вместе с подпиской)
+      setTimeout(() => this.publishPhone(), 6000)
+      setTimeout(() => this.publishPhone(), 20000)
+      log('push: уведомления включены', 'ok')
+      return true
+    } catch (e) {
+      log('push: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Выключить уведомления: отписка от push-сервиса + снятие подписки из Nostr */
+  async disable () {
+    try {
+      if (this.native()) {
+        try { await PushNotifications.unregister() } catch {}
+        this.fcmToken = ''
+        this.enabled = false
+        try {
+          if (NostrRendezvous.key && Store.data.profile.username) {
+            const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
+              [['d', CFG.NOSTR_ROOT + '/push/' + Store.data.profile.username]],
+              JSON.stringify({ fcm: '', ep: '', off: true, ts: Date.now() }))
+            NostrRendezvous.publishRaw(ev)
+          }
+        } catch {}
+        log('push: FCM-уведомления выключены', 'sys')
+        return true
+      }
+      if (this.reg) {
+        const s = await this.reg.pushManager.getSubscription()
+        if (s) await s.unsubscribe()
+      }
+      this.enabled = false
+      // снимаем подписку и в Nostr, чтобы отправители не шли в пустоту
+      try {
+        if (NostrRendezvous.key && Store.data.profile.username) {
+          const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
+            [['d', CFG.NOSTR_ROOT + '/push/' + Store.data.profile.username]],
+            JSON.stringify({ ep: '', off: true, ts: Date.now() }))
+          NostrRendezvous.publishRaw(ev)
+        }
+      } catch {}
+      log('push: уведомления выключены', 'sys')
+      return true
+    } catch (e) {
+      log('push off: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Подписка сейчас активна? */
+  async isActive () {
+    try {
+      if (this.native()) return !!this.fcmToken
+      if (!this.reg) return false
+      const s = await this.reg.pushManager.getSubscription()
+      return !!s
+    } catch { return false }
+  },
+
+  /** Нативное включение (APK): разрешение → регистрация FCM → публикация токена */
+  async _enableNative () {
+    try {
+      let perm = await PushNotifications.checkPermissions()
+      if (perm.display !== 'granted') perm = await PushNotifications.requestPermissions()
+      if (perm.display !== 'granted') {
+        log('push: разрешение на уведомления не выдано', 'warn')
+        return false
+      }
+      // листенеры — ДО register, иначе событие токена можно пропустить
+      // (добавляем один раз за жизнь страницы)
+      if (!this._nativeBound) {
+        this._nativeBound = true
+        await PushNotifications.addListener('registration', (t) => {
+          if (t && t.token) {
+            this.fcmToken = t.token
+            this.enabled = true
+            log('FCM-токен получен (' + t.token.slice(0, 12) + '…)', 'ok')
+            setTimeout(() => this.publishSub(), 1500)
+          }
+        })
+        await PushNotifications.addListener('pushNotificationReceived', (n) => {
+          // приложение на переднем плане: система само не покажет — показываем
+          const title = (n && n.title) || 'FoxOsis'
+          const body = (n && n.body) || 'Новое уведомление'
+          this.notify(title, body, (n && n.data && n.data.kind) || 'msg').catch(() => {})
+          if (typeof UI !== 'undefined' && UI.toast) UI.toast(title + ': ' + body)
+        })
+      }
+      await PushNotifications.register()
+      // токен может прийти чуть позже регистрации
+      const grab = async () => {
+        try { const g = await PushNotifications.getToken(); if (g && g.value) return g.value } catch {}
+        return ''
+      }
+      this.fcmToken = await grab()
+      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 3000)); this.fcmToken = await grab() }
+      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 5000)); this.fcmToken = await grab() }
+      if (this.fcmToken) {
+        this.enabled = true
+        setTimeout(() => this.publishSub(), 500)
+        setTimeout(() => this.publishSub(), 8000)
+        setTimeout(() => this.publishPhone(), 10000)
+        log('push: FCM включён (уведомления и при закрытом приложении)', 'ok')
+        return true
+      }
+      log('push: FCM-токен не получен', 'warn')
+      return false
+    } catch (e) {
+      log('push (native): ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Выложить свою push-подписку в Nostr (её читают отправители) */
+  async publishSub () {
+    try {
+      if (!NostrRendezvous.key) return false
+      const u = Store.data.profile.username
+      if (!u) return false
+      // нативное приложение: публикуем FCM-токен вместо браузерной подписки
+      if (this.native()) {
+        if (!this.fcmToken) return false
+        const ev0 = NostrRendezvous._signAny(CFG.UNAME_KIND,
+          [['d', CFG.NOSTR_ROOT + '/push/' + u]],
+          JSON.stringify({ fcm: this.fcmToken, ts: Date.now() }))
+        const sent0 = NostrRendezvous.publishRaw(ev0)
+        if (sent0) log('push: FCM-токен опубликован (' + sent0 + ' релеев)', 'ok')
+        return sent0 > 0
+      }
+      if (!this.enabled) return false
+      const open = NostrRendezvous.relays.some(r => r.ws && r.ws.readyState === 1)
+      if (!open) return false
+      const s = await this.reg.pushManager.getSubscription()
+      if (!s) return false
+      const json = s.toJSON ? s.toJSON() : s
+      if (!json.endpoint) return false
+      const body = JSON.stringify({
+        ep: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, ts: Date.now()
+      })
+      const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
+        [['d', CFG.NOSTR_ROOT + '/push/' + u]], body)
+      const sent = NostrRendezvous.publishRaw(ev)
+      if (sent) log('push: подписка опубликована (' + sent + ' релеев)', 'ok')
+      return sent > 0
+    } catch (e) {
+      log('push publish: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Своя телефонная запись в Nostr — по ней ищут «по номеру телефона» */
+  async publishPhone () {
+    try {
+      if (!NostrRendezvous.key) return false
+      const u = Store.data.profile.username
+      const ph = normPhone(Store.data.profile.phone)
+      if (!u || ph.length < 10) return false
+      const open = NostrRendezvous.relays.some(r => r.ws && r.ws.readyState === 1)
+      if (!open) return false
+      const body = JSON.stringify({
+        phone: formatPhone(ph), d: ph,
+        name: Store.data.profile.name || '', username: u, from: myId(), ts: Date.now()
+      })
+      const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
+        [['d', CFG.NOSTR_ROOT + '/phone/' + ph]], body)
+      const sent = NostrRendezvous.publishRaw(ev)
+      if (sent) log('телефон опубликован для поиска (' + sent + ' релеев)', 'ok')
+      return sent > 0
+    } catch (e) {
+      log('phone publish: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Отправить push подписчику @username (kind: 'call' | 'msg') */
+  async sendPush (username, kind, title, body) {
+    if (!username || !this.enabled) return false
+    try {
+      const evs = await NostrRendezvous.reqEvents(
+        { kinds: [CFG.UNAME_KIND], '#d': [CFG.NOSTR_ROOT + '/push/' + username], limit: 5 }, 3500)
+      if (!evs.length) return false
+      evs.sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+      let sub = null
+      try { sub = JSON.parse(evs[0].content) } catch {}
+      if (!sub) return false
+      const base = apiBase()
+
+      // 1) нативный получатель (APK): FCM-токен
+      if (sub.fcm) {
+        const r = await fetch(base + '/api/fcm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: sub.fcm, title, body, kind })
+        })
+        if (r.status !== 200) log('fcm HTTP ' + r.status, 'warn')
+        return r.status === 200
+      }
+
+      // 2) браузерный получатель: Web Push (VAPID + aes128gcm)
+      if (!sub.ep || !sub.p256dh || !sub.auth) return false
+      const enc = await this._encrypt(sub, JSON.stringify({ title, body, kind }))
+      const jwt = await this._vapidJwt(sub.ep)
+      const hdrs = {
+        Authorization: 'vapid t=' + jwt + ', k=' + this.VAPID_PUB,
+        'Content-Encoding': 'aes128gcm',
+        TTL: '86400',
+        Urgency: 'high'
+      }
+      let status = 0
+      try {
+        const direct = fetch(sub.ep, { method: 'POST', headers: hdrs, body: enc })
+        direct.catch(() => {})   // после таймаута — гасим поздний отказ
+        status = await Promise.race([
+          direct.then(r => r.status),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('direct timeout')), 6000))
+        ])
+      } catch {
+        // push-сервис не отдаёт CORS (WNS у Edge) — форвард через /api/push
+        const base = apiBase()
+        const resp = await fetch(base + '/api/push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ep: sub.ep,
+            h: { Authorization: hdrs.Authorization },
+            b: this._b64(enc)
+          })
+        })
+        status = resp.status
+      }
+      if (status !== 201) log('push HTTP ' + status, 'warn')
+      return status === 201
+    } catch (e) {
+      log('push send: ' + e.message, 'warn')
+      return false
+    }
+  },
+
+  /** Локальное уведомление через Service Worker (вкладка скрыта) */
+  async notify (title, body, kind) {
+    if (!this.reg || typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+    try {
+      const opts = {
+        body: body || '',
+        icon: './logo.jpeg',
+        badge: './logo.jpeg',
+        tag: kind === 'call' ? 'foxosis-call' : 'foxosis-msg',
+        renotify: true,
+        requireInteraction: kind === 'call',
+        data: { url: './' }
+      }
+      if (kind === 'call') {
+        opts.actions = [{ action: 'accept', title: 'Принять' }, { action: 'decline', title: 'Сбросить' }]
+      }
+      await this.reg.showNotification(title || 'FoxOsis', opts)
+    } catch (e) { /* WebView без поддержки уведомлений */ }
+  },
+
+  /* ---------- криптография (WebCrypto, без внешних библиотек) ---------- */
+
+  _b64uBytes (s) {
+    const b64 = String(s).replace(/-/g, '+').replace(/_/g, '/')
+    const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : ''
+    const bin = atob(b64 + pad)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+  },
+
+  _b64u (bytes) {
+    let bin = ''
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  },
+
+  /** Обычное base64 (для форварда /api/push) */
+  _b64 (bytes) {
+    let bin = ''
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return btoa(bin)
+  },
+
+  _concat (a, b) {
+    const out = new Uint8Array(a.length + b.length)
+    out.set(a, 0)
+    out.set(b, a.length)
+    return out
+  },
+
+  /** Шифрование payload: RFC 8291 + RFC 8188 (aes128gcm), ровно как
+   *  понимает браузер-получатель. Возвращает header(86)||ciphertext. */
+  async _encrypt (sub, plaintext) {
+    const ECDH = { name: 'ECDH', namedCurve: 'P-256' }
+    const enc = new TextEncoder()
+    const hmac = async (keyBytes, data) => {
+      const k = await crypto.subtle.importKey(
+        'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+      return new Uint8Array(await crypto.subtle.sign('HMAC', k, data))
+    }
+
+    // 1) ECDH: as_private + ua_public
+    const local = await crypto.subtle.generateKey(ECDH, false, ['deriveBits'])
+    const uaPub = this._b64uBytes(sub.p256dh)          // 65 байт, 0x04…
+    const uaPubKey = await crypto.subtle.importKey('raw', uaPub, ECDH, false, [])
+    const ecdhSecret = new Uint8Array(await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: uaPubKey }, local.privateKey, 256))
+    const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', local.publicKey))
+    const auth = this._b64uBytes(sub.auth)              // 16 байт
+
+    // 2) HKDF-Extract(salt=auth, IKM=ecdh)
+    const prkKey = await hmac(auth, ecdhSecret)
+    // 3) key_info = "WebPush: info" || 0 || ua_public || as_public
+    const keyInfo = this._concat(
+      this._concat(enc.encode('WebPush: info'), new Uint8Array([0])),
+      this._concat(uaPub, asPub))
+    // 4) IKM = Expand(prkKey, key_info||0x01, 32)
+    const ikm = (await hmac(prkKey, this._concat(keyInfo, new Uint8Array([1])))).slice(0, 32)
+    // 5) salt из заголовка + HKDF по RFC 8188
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const prk = await hmac(salt, ikm)
+    const cekInfo = this._concat(enc.encode('Content-Encoding: aes128gcm'), new Uint8Array([0]))
+    const nonceInfo = this._concat(enc.encode('Content-Encoding: nonce'), new Uint8Array([0]))
+    const cek = (await hmac(prk, this._concat(cekInfo, new Uint8Array([1])))).slice(0, 16)
+    const nonce = (await hmac(prk, this._concat(nonceInfo, new Uint8Array([1])))).slice(0, 12)
+
+    // 6) header = salt(16) || rs=4096(4) || len=65(1) || as_public(65) = 86
+    const rs = new Uint8Array([0x00, 0x00, 0x10, 0x00])
+    const header = this._concat(
+      this._concat(salt, rs),
+      this._concat(new Uint8Array([65]), asPub))
+
+    // 7) plaintext || 0x02 (padding delimiter) → AES-128-GCM (одна запись)
+    const pt = enc.encode(plaintext)
+    const body = new Uint8Array(pt.length + 1)
+    body.set(pt, 0)
+    body[pt.length] = 0x02
+    const cekKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt'])
+    const ct = new Uint8Array(await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce }, cekKey, body))
+
+    return this._concat(header, ct)
+  },
+
+  /** VAPID-подпись (ES256/JWT) для запроса к push-сервису */
+  async _vapidJwt (endpoint) {
+    const b64uJson = (o) =>
+      btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    const aud = new URL(endpoint).origin
+    const exp = Math.floor(Date.now() / 1000) + 12 * 3600
+    const data = b64uJson({ typ: 'JWT', alg: 'ES256' }) + '.' +
+      b64uJson({ aud, exp, sub: 'mailto:foxosis@local' })
+    const pub = this._b64uBytes(this.VAPID_PUB)
+    const jwk = {
+      kty: 'EC', crv: 'P-256', ext: true, d: this.VAPID_PRIV,
+      x: this._b64u(pub.slice(1, 33)),
+      y: this._b64u(pub.slice(33, 65))
+    }
+    const key = await crypto.subtle.importKey('jwk', jwk,
+      { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'])
+    const sig = new Uint8Array(await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(data)))
+    return data + '.' + this._b64u(this._sigRaw(sig))
+  },
+
+  /** Привести подпись к 64 байтам R||S (формат Web Push/VAPID).
+   *  WebCrypto отдаёт сырые R||S; DER — на случай другой реализации. */
+  _sigRaw (sig) {
+    if (sig.length === 64) return sig
+    if (sig.length < 8 || sig[0] !== 0x30) return sig.slice(0, 64)   // неожиданный формат
+    let i = (sig[1] & 0x80) ? 2 + (sig[1] & 0x7f) : 2
+    const readInt = () => {
+      i++                       // тег INTEGER (0x02)
+      let len = sig[i++]
+      if (len & 0x80) {
+        const n = len & 0x7f
+        len = 0
+        for (let k = 0; k < n; k++) len = (len << 8) | sig[i++]
+      }
+      let v = sig.slice(i, i + len)
+      i += len
+      let s = 0
+      while (s < v.length - 1 && v[s] === 0) s++   // убрать ведущие нули
+      v = v.slice(s)
+      if (v.length > 32) v = v.slice(v.length - 32) // подстраховка
+      const out = new Uint8Array(32)
+      out.set(v, 32 - v.length)                    // дополнить слева до 32
+      return out
+    }
+    return this._concat(readInt(), readInt())
+  }
+}
+
+/* ==========================================================================
  * 13. Call — аудио/видео звонки (WebRTC RTCPeerConnection + STUN/TURN)
  *     Сигналинг (SDP) передаётся ВНУТРИ канала libp2p по PROTO_SIGNAL.
  *     ICE: несколько публичных STUN (Google/Cloudflare/Twilio) + бесплатный
@@ -3627,6 +4657,9 @@ class CallManager {
     this.localStream = null
     this.remoteStream = null
     this.pendingOffer = null // сохранённый входящий оффер до нажатия «Принять»
+    this._offerTimer = null  // таймер повтора оффера (закрытое приложение)
+    this._pendingCall = null // ожидание появления собеседника в сети
+    this.autoInc = null      // действие из уведомления ОС: accept | decline
   }
 
   /** Есть ли доступ к камере/микрофону (в secure context: https или localhost) */
@@ -3647,7 +4680,26 @@ class CallManager {
 
     // звонок требует сигнального канала — подключаемся при необходимости
     if (!isConnectedTo(peer)) {
-      if (!Rendezvous.isOnline(peer)) { UI.toast('Собеседник не в сети'); return }
+      if (!Rendezvous.isOnline(peer)) {
+        // собеседник не в сети: будим его пушем (приложение может быть
+        // закрыто) и автоматически звоним, когда он появится в присутствии
+        this._pushCall(peer, kind)
+        UI.toast('Собеседник не в сети — уведомление отправлено, ждём появления…')
+        if (this._pendingCall) { clearInterval(this._pendingCall); this._pendingCall = null }
+        let waited = 0
+        this._pendingCall = setInterval(() => {
+          waited += 5000
+          if (this.state !== 'idle' || App.currentPeer !== peer || waited >= 300000) {
+            clearInterval(this._pendingCall); this._pendingCall = null
+            return
+          }
+          if (Rendezvous.isOnline(peer) || isConnectedTo(peer)) {
+            clearInterval(this._pendingCall); this._pendingCall = null
+            this.start(kind).catch(() => {})
+          }
+        }, 5000)
+        return
+      }
       try {
         UI.setCallStatus('Подключение…')
         await Rendezvous.connect(peer)
@@ -3685,11 +4737,64 @@ class CallManager {
       await Signal.send(peer, { k: 'call-offer', kind, sdp: this.pc.localDescription.sdp })
       UI.setCallStatus('Вызов…')
       log('оффер звонка отправлен по каналу libp2p', 'ok')
+      this._offerRetry(peer, kind)  // повторять, пока приложение собеседника не проснётся
+      this._pushCall(peer, kind)    // пуш: звонок виден при закрытом приложении
     } catch (e) {
       UI.toast('Не удалось начать вызов: ' + e.message)
       log('start call: ' + e.message, 'err')
       this._teardown()
     }
+  }
+
+  /** Пока не пришёл ответ/не открылось приложение — повторяем оффер:
+   *  закрытое приложение просыпается по пушу и подключается позже,
+   *  ему нужен свежий оффер (старый мог протухнуть). ~45 секунд. */
+  _offerRetry (peer, kind) {
+    this._stopOfferRetry()
+    let tries = 0
+    this._offerTimer = setInterval(async () => {
+      if (this.state !== 'outgoing' || this.peer !== peer || !this.pc) {
+        this._stopOfferRetry()
+        return
+      }
+      if (isConnectedTo(peer)) { this._stopOfferRetry(); return } // канал жив — ждём ansver
+      tries++
+      if (tries > 18) { this._stopOfferRetry(); return }
+      try {
+        const offer = this.pc.localDescription
+        if (offer) await Signal.send(peer, { k: 'call-offer', kind, sdp: offer.sdp })
+      } catch { /* сокет умер — попробуем в следующий тик */ }
+    }, 2500)
+  }
+
+  _stopOfferRetry () {
+    if (this._offerTimer) { clearInterval(this._offerTimer); this._offerTimer = null }
+  }
+
+  /** Пуш собеседнику: звонок виден даже при закрытом приложении */
+  _pushCall (peer, kind) {
+    try {
+      const chat = Store.data.chats[peer] || {}
+      const pres = Rendezvous.lookup(peer) || {}
+      const uname = chat.username || pres.username || ''
+      if (!uname) return
+      Push.sendPush(uname, 'call', 'FoxOsis',
+        `${Store.data.profile.name || 'Кто-то'} — входящий ${kind === 'voice' ? 'голосовой' : 'видео'}-звонок`
+      ).catch(() => {})
+    } catch { /* push опционален — звонок не должен падать из-за него */ }
+  }
+
+  /** Действие из уведомления ОС: 'accept' | 'decline' */
+  incAction (act) {
+    if (this.state === 'incoming') {
+      if (act === 'accept') this.accept()
+      else if (act === 'decline') this.decline()
+      return
+    }
+    // приложение только что открыли по клику — запомним действие, пока
+    // придут ретраи оффера звонящего (обычно 2–3 секунды)
+    this.autoInc = act
+    setTimeout(() => { this.autoInc = null }, 60000)
   }
 
   /** Входящий оффер пришёл — показываем окно входящего звонка */
@@ -3714,6 +4819,14 @@ class CallManager {
     this.kind = msg.kind === 'voice' ? 'voice' : 'video'
     this.pendingOffer = msg
     UI.showIncoming(peerStr, this.kind)
+    if (document.hidden) Push.notify('FoxOsis', `${shortId(peerStr)} — входящий звонок`, 'call')
+    if (this.autoInc) {
+      // клик по кнопке уведомления ОС на закрытой вкладке — принимаем/сбрасываем
+      const act = this.autoInc
+      this.autoInc = null
+      setTimeout(() => (act === 'accept' ? this.accept() : this.decline()), 500)
+      return
+    }
     UI.els.chatStatus.textContent = 'входящий звонок…'
     UI.els.chatStatus.className = 'status warn'
     log(`входящий звонок от ${shortId(peerStr)} (${this.kind})`, 'sys')
@@ -3782,6 +4895,7 @@ class CallManager {
     try {
       await this.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp })
       this.state = 'active'
+      this._stopOfferRetry()
       UI.setCallStatus('Соединение…')
       log('ansver принят', 'ok')
     } catch (e) {
@@ -3901,6 +5015,8 @@ class CallManager {
 
   /** Полная очистка состояния звонка */
   _teardown (notifyUi = true) {
+    this._stopOfferRetry()
+    if (this._pendingCall) { clearInterval(this._pendingCall); this._pendingCall = null }
     const pc = this.pc
     this.pc = null
     if (pc) { try { pc.close() } catch {} }
@@ -4063,6 +5179,12 @@ async function boot () {
   LanRendezvous.start()
   NostrRendezvous.start()
 
+  // push: Service Worker + (если уже вошли) разрешение и подписка
+  Push.start().catch(() => {})
+  if (Store.data.profile.authed && Store.data.profile.name) {
+    Push.enable().catch(() => {})
+  }
+
   // 5.1) восстановление после «моргания» сети: вкладка вернулась из фона,
   //      появился интернет — сбрасываем backoff и переподключаем ОТКРЫТЫЙ чат
   //      (фоновые — не трогаем, чтобы не плодить встречные офферы)
@@ -4097,6 +5219,19 @@ async function boot () {
   }
   UI.renderChatList()
 
+  // клик по уведомлению ОС («Принять/Сбросить» / открытие приложения)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (ev) => {
+      const a = ev.data && ev.data.foxosisInc
+      if (a === 'accept' || a === 'decline') Call.incAction(a)
+    })
+  }
+  const inc = (location.hash || '').match(/inc=(accept|decline)/)
+  if (inc) Call.incAction(inc[1])
+  if (location.hash) {
+    try { history.replaceState(null, '', location.pathname + location.search) } catch {}
+  }
+
   App.ready = true
   log('готово — можно переписываться и звонить', 'ok')
 }
@@ -4121,6 +5256,7 @@ window.Fox = {
   rename: (n) => { Store.setProfileName(n); Presence.announce() },
   logout: () => Auth.logout(),
   Vault,
+  Push,
   UI, Store, Rendezvous, LanRendezvous, NostrRendezvous, Reconnector, Call, Chat, Signal, Presence, Auth, App
 }
 
