@@ -852,7 +852,7 @@ const UI = {
       'spanelProfile', 'spanelNotify', 'spanelAbout',
       'btnSetProfile', 'setUser', 'setPeer', 'btnSetCopyId',
       'btnPushToggle', 'btnPushTest', 'pushStatus', 'setVer', 'setConn', 'btnSetLog',
-      'srvInput', 'btnSrvSave',
+      'srvInput', 'btnSrvSave', 'btnTheme',
       'splash', 'btnEnter', 'auth', 'tabReg', 'tabLogin',
       'formReg', 'regName', 'regUser', 'regPass', 'btnRegister',
       'regEmail', 'regCode', 'btnEmailCode',
@@ -900,9 +900,10 @@ const UI = {
       if (d) d.open = true
     }
     if (e.btnSrvSave) e.btnSrvSave.onclick = () => this.saveServer()
+    if (e.btnTheme) e.btnTheme.onclick = () => this.toggleTheme()
     e.btnNewChat.onclick = () => this.showSide('new')
     e.btnBackList.onclick = () => this.showSide('list')
-    e.searchInput.oninput = () => { this.renderChatList(); this.maybePhoneSearch() }
+    e.searchInput.oninput = () => { this.renderChatList(); this.maybePhoneSearch(); this.maybeNameSearch() }
     if (e.netStatus) e.netStatus.onclick = () => this.showModal('profile')
 
     // --- Android WebView: глушим длинное нажатие (меню «Копировать/
@@ -1083,6 +1084,14 @@ const UI = {
       // 2б) поиск по телефону: цифровой запрос нашёл публикации в Nostr
       if (this.phoneHits.length && this.phoneQ === normPhone(e.searchInput.value)) {
         for (const h of this.phoneHits) {
+          if (seen.has(h.peerId)) continue
+          seen.add(h.peerId)
+          rows.push({ peerId: h.peerId, chat: null, presence: { name: h.name, username: h.username, peerId: h.peerId } })
+        }
+      }
+      // 2в) поиск по @юзернейму: заявка в релеях хранит peerId — офлайн тоже
+      if (this.nameHits && this.nameHits.length && this.nameQ === filter) {
+        for (const h of this.nameHits) {
           if (seen.has(h.peerId)) continue
           seen.add(h.peerId)
           rows.push({ peerId: h.peerId, chat: null, presence: { name: h.name, username: h.username, peerId: h.peerId } })
@@ -1502,7 +1511,25 @@ const UI = {
     e.setPeer.textContent = App.node ? App.node.peerId.toString() : 'генерация…'
     e.setVer.textContent = typeof APP_VERSION !== 'undefined' ? APP_VERSION : '2.0'
     if (e.srvInput) e.srvInput.value = Store.data.server || ''
+    this.applyTheme()
     this.settingsTab(tab || 'profile')
+  },
+
+  /** Тёмная/светлая тема (Настройки → Профиль) */
+  applyTheme () {
+    const dark = Store.data.theme === 'dark'
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    const b = this.els.btnTheme
+    if (b) {
+      b.textContent = dark ? 'Выключить' : 'Включить'
+      b.classList.toggle('on', dark)
+    }
+  },
+  toggleTheme () {
+    Store.data.theme = Store.data.theme === 'dark' ? 'light' : 'dark'
+    Store.save()
+    this.applyTheme()
+    this.toast(Store.data.theme === 'dark' ? 'Тёмная тема включена' : 'Светлая тема включена')
   },
 
   /** Сохранить адрес сервера (нужен телефону: коды по почте и /api/fcm) */
@@ -1541,6 +1568,18 @@ const UI = {
   async refreshNotifyStatus () {
     const e = this.els
     if (!e.pushStatus) return
+    // нативное приложение (APK): Web Push нет — статус по FCM-токену
+    if (Push.native()) {
+      const on = await Push.isActive()
+      e.pushStatus.textContent = 'Статус (FCM): ' + (on
+        ? 'токен получен — уведомления приходят с выключенным экраном'
+        : (Push._permState
+          ? 'разрешение: ' + Push._permState + ' — нажми «Включить»'
+          : 'не включено — нажми «Включить»'))
+      e.btnPushToggle.textContent = on ? 'Выключить' : 'Включить'
+      e.btnPushToggle.classList.toggle('on', on)
+      return
+    }
     const supported = 'Notification' in window
     const perm = supported ? Notification.permission : 'unsupported'
     const active = await Push.isActive()
@@ -1679,6 +1718,38 @@ const UI = {
     }
     this.phoneHits = hits
     if (hits.length) log(`поиск по телефону: найдено ${hits.length}`, 'ok')
+    this.renderChatList()
+  },
+
+  /** Поиск по @юзернейму в публичных релеях: находит собеседника, даже
+   *  если он офлайн (в заявке uname лежит его peerId) — можно открыть чат
+   *  и написать в любое время, сообщение уйдёт при появлении связи. */
+  async maybeNameSearch () {
+    const raw = (this.els.searchInput.value || '').trim().toLowerCase().replace(/^@/, '')
+    if (!/^[a-z0-9_]{3,20}$/.test(raw)) {
+      if (this.nameQ) { this.nameQ = ''; this.nameHits = [] }
+      return
+    }
+    if (raw === this.nameQ) return
+    this.nameQ = raw
+    this.nameHits = []
+    let evs = []
+    try {
+      evs = await NostrRendezvous.reqEvents(
+        { kinds: [CFG.UNAME_KIND], '#d': ['uname/' + raw], limit: 5 }, 3000)
+    } catch { return }
+    if (raw !== this.nameQ) return
+    const hits = []
+    for (const ev of evs) {
+      try {
+        const c = JSON.parse(ev.content)
+        if (c && c.peer && c.peer !== myId()) {
+          hits.push({ peerId: String(c.peer), name: String(c.name || c.username || raw), username: String(c.username || raw) })
+        }
+      } catch { /* битая запись */ }
+    }
+    this.nameHits = hits
+    if (hits.length) log(`поиск @${raw}: найдено ${hits.length} (офлайн-заявка)`, 'ok')
     this.renderChatList()
   },
 
@@ -2188,7 +2259,7 @@ const Auth = {
         this._err(null, 'reg')
         log('email-код (dev): ' + d.code, 'sys')
       }
-      this.toast(d.dev ? 'Код показан в поле (dev без SMTP)' : 'Код отправлен на почту')
+      UI.toast(d.dev ? 'Код показан в поле (dev без SMTP)' : 'Код отправлен на почту')
     } catch (ex) {
       this._err('Не удалось получить код: ' + ex.message, 'reg')
     } finally {
@@ -2243,7 +2314,7 @@ const Auth = {
         Store.data.profile.email = email
         Store.save()
       } else {
-        this.toast('Email не подтверждён — регистрируемся без почты')
+        UI.toast('Email не подтверждён — регистрируемся без почты')
         log('email пропущен (код не подтверждён): ' + email, 'sys')
       }
     }
@@ -3225,8 +3296,11 @@ const NostrRendezvous = {
   publishUname (username, name, acc) {
     if (!this.key) { try { this._loadKey() } catch { return } }
     try {
+      // peer — наш libp2p Peer ID: по заявке @ника любой найдёт нас
+      // офлайн и сможет открыть чат (поиск в поисковой строке)
+      const peer = (typeof myId === 'function' && myId()) || ''
       this._claim = this._signAny(CFG.UNAME_KIND, [['d', 'uname/' + username]],
-        JSON.stringify({ username, name: name || '', acc: acc || '', ts: Date.now() }))
+        JSON.stringify({ username, name: name || '', acc: acc || '', peer, ts: Date.now() }))
     } catch { return }
     if (this._flushClaim(true)) log('заявка на @' + username + ' опубликована в публичных релеях', 'ok')
   },
@@ -3465,10 +3539,13 @@ class LocalRendezvous {
         if (this._avaAsked.size > 400) this._avaAsked.delete(this._avaAsked.values().next().value)
         this._post({ t: 'ava?', to: from })
       }
-      // есть ОТКРЫТЫЙ чат, соединения нет, собеседник «в сети» — чиним сами
-      // (после обрыва/смены сети). Фоновые чаты НЕ трогаем: иначе обе
-      // стороны одновременно лезут с офферами и гонка крутится по кругу.
-      if (App.currentPeer === from && !isConnectedTo(from)) Reconnector.schedule(from)
+      // есть ОТКРЫТЫЙ чат или недоставленные сообщения, соединения нет,
+      // собеседник «в сети» — чиним сами (после обрыва/смены сети).
+      // Фоновые чаты БЕЗ очереди НЕ трогаем: иначе обе стороны
+      // одновременно лезут с офферами и гонка крутится по кругу.
+      if (!isConnectedTo(from) && (App.currentPeer === from || hasUndelivered(from))) {
+        Reconnector.schedule(from)
+      }
       return
     }
     // аватар собеседника: прислали (broadcast или ответ на наш запрос)
@@ -4087,25 +4164,33 @@ async function tryDeliver (peer, msg) {
   if (isConnectedTo(peer)) {
     try { await doSend(); return } catch (e) { log('доставка не удалась: ' + e.message, 'err') }
   }
-  // соединения нет: если собеседник в сети — подключаемся и отправляем
-  if (Rendezvous.isOnline(peer)) {
-    try {
-      await Rendezvous.connect(peer)
-      await doSend()
-    } catch (e) {
-      log('не удалось отправить: ' + e.message, 'err')
-      UI.toast('Соединение не установлено — сообщение отправится позже')
-    }
-  } else {
-    UI.toast('Собеседник не в сети — сообщение отправится при появлении')
-    // пуш собеседнику: он увидит уведомление и откроет приложение,
-    // недоставленные сообщения уйдут автоматически при появлении связи
-    const chat = Store.data.chats[peer]
-    if (chat && chat.username) {
-      Push.sendPush(chat.username, 'msg', 'FoxOsis',
-        `${chat.name || chat.username}: ${msg.text.slice(0, 100)}`).catch(() => {})
-    }
+  // соединения нет — пробуем подключиться ВСЕГДА (оффер идёт через
+  // Nostr-сигналинг): сработает, даже если собеседник «не в сети»
+  // по присутствию, а его приложение просто открыто
+  try {
+    await Rendezvous.connect(peer)
+    await doSend()
+    return
+  } catch (e) {
+    // подключение уже идёт — сообщение дослается само (flushUndelivered)
+    if (/уже идёт/.test(String(e.message || e))) return
+    log('не удалось отправить: ' + e.message, 'err')
   }
+  UI.toast('Собеседник не в сети — сообщение отправится при появлении')
+  // пуш собеседнику: он увидит уведомление и откроет приложение,
+  // недоставленные сообщения уйдут автоматически при появлении связи
+  const chat = Store.data.chats[peer]
+  if (chat && chat.username) {
+    Push.sendPush(chat.username, 'msg', 'FoxOsis',
+      `${chat.name || chat.username}: ${msg.text.slice(0, 100)}`).catch(() => {})
+  }
+}
+
+/** Есть ли недоставленные исходящие сообщения (для авто-досылки) */
+function hasUndelivered (peer) {
+  const chat = Store.data.chats[peer]
+  if (!chat) return false
+  return chat.messages.some(m => m.side === 'me' && !m.delivered)
 }
 
 /** Дослать недоставленные сообщения при появлении соединения */
@@ -4246,6 +4331,7 @@ const Push = {
       setTimeout(() => this.publishSub(), 3000)
       setTimeout(() => this.publishSub(), 10000)
       setTimeout(() => this.publishSub(), 30000)
+      this._ensureRepublish()
       // телефон — для поиска по номеру (публикуется вместе с подпиской)
       setTimeout(() => this.publishPhone(), 6000)
       setTimeout(() => this.publishPhone(), 20000)
@@ -4307,17 +4393,23 @@ const Push = {
     } catch { return false }
   },
 
-  /** Нативное включение (APK): разрешение → регистрация FCM → публикация токена */
+  /** Нативное включение (APK): разрешение (не блокирует!) → FCM → публикация */
   async _enableNative () {
     try {
-      let perm = await PushNotifications.checkPermissions()
-      if (perm.display !== 'granted') perm = await PushNotifications.requestPermissions()
-      if (perm.display !== 'granted') {
-        log('push: разрешение на уведомления не выдано', 'warn')
-        return false
+      // 1) разрешение — только информируем. Плагин может отчитаться
+      //    «denied», даже когда уведомления включены в настройках Android:
+      //    НЕ блокируемся, токен FCM регистрируется в любом случае.
+      let perm = { display: 'unknown' }
+      try { perm = await PushNotifications.checkPermissions() } catch (e) { log('push checkPerm: ' + e.message, 'warn') }
+      this._permState = String((perm && perm.display) || 'unknown')
+      if (this._permState !== 'granted') {
+        try { perm = await PushNotifications.requestPermissions() } catch (e) { log('push reqPerm: ' + e.message, 'warn') }
+        this._permState = String((perm && perm.display) || 'unknown')
       }
-      // листенеры — ДО register, иначе событие токена можно пропустить
-      // (добавляем один раз за жизнь страницы)
+      log('push: разрешение плагина = ' + this._permState + ' (продолжаем в любом случае)', 'sys')
+
+      // 2) листенеры — ДО register, иначе событие токена можно пропустить
+      //    (добавляем один раз за жизнь страницы)
       if (!this._nativeBound) {
         this._nativeBound = true
         await PushNotifications.addListener('registration', (t) => {
@@ -4326,6 +4418,8 @@ const Push = {
             this.enabled = true
             log('FCM-токен получен (' + t.token.slice(0, 12) + '…)', 'ok')
             setTimeout(() => this.publishSub(), 1500)
+            setTimeout(() => this.publishSub(), 8000)
+            setTimeout(() => this.publishSub(), 20000)
           }
         })
         await PushNotifications.addListener('pushNotificationReceived', (n) => {
@@ -4336,8 +4430,9 @@ const Push = {
           if (typeof UI !== 'undefined' && UI.toast) UI.toast(title + ': ' + body)
         })
       }
-      await PushNotifications.register()
-      // токен может прийти чуть позже регистрации
+
+      // 3) регистрация FCM (токен не требует разрешения на уведомления)
+      try { await PushNotifications.register() } catch (e) { log('push register: ' + e.message, 'warn') }
       const grab = async () => {
         try { const g = await PushNotifications.getToken(); if (g && g.value) return g.value } catch {}
         return ''
@@ -4349,11 +4444,13 @@ const Push = {
         this.enabled = true
         setTimeout(() => this.publishSub(), 500)
         setTimeout(() => this.publishSub(), 8000)
+        setTimeout(() => this.publishSub(), 20000)
         setTimeout(() => this.publishPhone(), 10000)
+        this._ensureRepublish()
         log('push: FCM включён (уведомления и при закрытом приложении)', 'ok')
         return true
       }
-      log('push: FCM-токен не получен', 'warn')
+      log('push: FCM-токен не получен — проверь, что приложение не в «спящем» режиме', 'warn')
       return false
     } catch (e) {
       log('push (native): ' + e.message, 'warn')
@@ -4361,41 +4458,61 @@ const Push = {
     }
   },
 
-  /** Выложить свою push-подписку в Nostr (её читают отправители) */
+  /** Выложить свою push-подписку в Nostr (её читают отправители).
+   *  Не зависит от флага enabled: подписка есть в браузере или токен FCM
+   *  есть в телефоне — публикуем; релеи закрыты — повторяем каждые 5 с. */
   async publishSub () {
     try {
       if (!NostrRendezvous.key) return false
       const u = Store.data.profile.username
       if (!u) return false
-      // нативное приложение: публикуем FCM-токен вместо браузерной подписки
-      if (this.native()) {
-        if (!this.fcmToken) return false
-        const ev0 = NostrRendezvous._signAny(CFG.UNAME_KIND,
-          [['d', CFG.NOSTR_ROOT + '/push/' + u]],
-          JSON.stringify({ fcm: this.fcmToken, ts: Date.now() }))
-        const sent0 = NostrRendezvous.publishRaw(ev0)
-        if (sent0) log('push: FCM-токен опубликован (' + sent0 + ' релеев)', 'ok')
-        return sent0 > 0
+      const sent = await this._publishSubNow(u)
+      if (sent) { this._pubTries = 0; return true }
+      if (Store.data.profile.authed && (this._pubTries || 0) < 60) {
+        this._pubTries = (this._pubTries || 0) + 1
+        setTimeout(() => this.publishSub().catch(() => {}), 5000)
       }
-      if (!this.enabled) return false
-      const open = NostrRendezvous.relays.some(r => r.ws && r.ws.readyState === 1)
-      if (!open) return false
-      const s = await this.reg.pushManager.getSubscription()
-      if (!s) return false
-      const json = s.toJSON ? s.toJSON() : s
-      if (!json.endpoint) return false
-      const body = JSON.stringify({
-        ep: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, ts: Date.now()
-      })
-      const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
-        [['d', CFG.NOSTR_ROOT + '/push/' + u]], body)
-      const sent = NostrRendezvous.publishRaw(ev)
-      if (sent) log('push: подписка опубликована (' + sent + ' релеев)', 'ok')
-      return sent > 0
+      return false
     } catch (e) {
       log('push publish: ' + e.message, 'warn')
       return false
     }
+  },
+
+  /** Одна попытка публикации подписки (FCM-токен в APK / Web Push в браузере) */
+  async _publishSubNow (u) {
+    // нативное приложение: публикуем FCM-токен вместо браузерной подписки
+    if (this.native()) {
+      if (!this.fcmToken) return false
+      const ev0 = NostrRendezvous._signAny(CFG.UNAME_KIND,
+        [['d', CFG.NOSTR_ROOT + '/push/' + u]],
+        JSON.stringify({ fcm: this.fcmToken, ts: Date.now() }))
+      const sent0 = NostrRendezvous.publishRaw(ev0)
+      if (sent0) log('push: FCM-токен опубликован (' + sent0 + ' релеев)', 'ok')
+      return sent0 > 0
+    }
+    if (!this.reg) await this.start()
+    if (!this.reg) return false
+    const s = await this.reg.pushManager.getSubscription()
+    if (!s) return false
+    const json = s.toJSON ? s.toJSON() : s
+    if (!json.endpoint) return false
+    const body = JSON.stringify({
+      ep: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, ts: Date.now()
+    })
+    const ev = NostrRendezvous._signAny(CFG.UNAME_KIND,
+      [['d', CFG.NOSTR_ROOT + '/push/' + u]], body)
+    const sent = NostrRendezvous.publishRaw(ev)
+    if (sent) log('push: подписка опубликована (' + sent + ' релеев)', 'ok')
+    return sent > 0
+  },
+
+  /** Раз в 10 минут подтверждаем подписку в релеях (замена могла устареть) */
+  _ensureRepublish () {
+    if (this._repubTimer) return
+    this._repubTimer = setInterval(() => {
+      if (Store.data.profile.authed) this.publishSub().catch(() => {})
+    }, 600000)
   },
 
   /** Своя телефонная запись в Nostr — по ней ищут «по номеру телефона» */
@@ -4422,9 +4539,11 @@ const Push = {
     }
   },
 
-  /** Отправить push подписчику @username (kind: 'call' | 'msg') */
+  /** Отправить push подписчику @username (kind: 'call' | 'msg').
+   *  НЕ зависит от того, включён ли push у ОТПРАВИТЕЛЯ — решает
+   *  подписка получателя. */
   async sendPush (username, kind, title, body) {
-    if (!username || !this.enabled) return false
+    if (!username) return false
     try {
       const evs = await NostrRendezvous.reqEvents(
         { kinds: [CFG.UNAME_KIND], '#d': [CFG.NOSTR_ROOT + '/push/' + username], limit: 5 }, 3500)
@@ -4437,13 +4556,21 @@ const Push = {
 
       // 1) нативный получатель (APK): FCM-токен
       if (sub.fcm) {
-        const r = await fetch(base + '/api/fcm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: sub.fcm, title, body, kind })
-        })
-        if (r.status !== 200) log('fcm HTTP ' + r.status, 'warn')
-        return r.status === 200
+        try {
+          const r = await fetch(base + '/api/fcm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: sub.fcm, title, body, kind })
+          })
+          if (r.status !== 200) log('fcm HTTP ' + r.status, 'warn')
+          return r.status === 200
+        } catch (e) {
+          log('fcm: ' + e.message +
+            (this.native() && !String(Store.data.server || '').trim()
+              ? ' — на телефоне укажи адрес сервера: Настройки → О приложении'
+              : ''), 'warn')
+          return false
+        }
       }
 
       // 2) браузерный получатель: Web Push (VAPID + aes128gcm)
@@ -5123,6 +5250,7 @@ function keepAliveTick () {
 async function boot () {
   UI.init()
   Store.load()
+  UI.applyTheme()   // тёмная/светлая тема — до первого показа экранов
 
   // экраны: заставка → регистрация/вход, либо сразу приложение
   Auth.initial()
@@ -5183,6 +5311,12 @@ async function boot () {
   Push.start().catch(() => {})
   if (Store.data.profile.authed && Store.data.profile.name) {
     Push.enable().catch(() => {})
+    // заявка @ника обновляется при каждом входе: в ней наш peerId —
+    // по нему собеседники находят нас офлайн (поиск по @юзернейму)
+    try {
+      const p = Store.data.profile
+      if (p.username) NostrRendezvous.publishUname(p.username, p.name, p.passHash)
+    } catch {}
   }
 
   // 5.1) восстановление после «моргания» сети: вкладка вернулась из фона,
