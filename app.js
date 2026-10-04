@@ -4432,14 +4432,27 @@ const Push = {
       }
 
       // 3) регистрация FCM (токен не требует разрешения на уведомления)
+      try {
+        const plug = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications
+        if (!plug) log('push: плагин PushNotifications НЕ найден в мосту Capacitor', 'warn')
+      } catch {}
       try { await PushNotifications.register() } catch (e) { log('push register: ' + e.message, 'warn') }
-      const grab = async () => {
-        try { const g = await PushNotifications.getToken(); if (g && g.value) return g.value } catch {}
+      const grab = async (tag) => {
+        try {
+          const g = await Promise.race([
+            PushNotifications.getToken(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('getToken завис')), 6000))
+          ])
+          if (g && g.value) return g.value
+          log('push getToken пуст (' + tag + ') — обычно нет Google Play Services или интернета', 'warn')
+        } catch (e) {
+          log('push getToken (' + tag + '): ' + e.message, 'warn')
+        }
         return ''
       }
-      this.fcmToken = await grab()
-      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 3000)); this.fcmToken = await grab() }
-      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 5000)); this.fcmToken = await grab() }
+      this.fcmToken = await grab('1')
+      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 3000)); this.fcmToken = await grab('2') }
+      if (!this.fcmToken) { await new Promise(r => setTimeout(r, 5000)); this.fcmToken = await grab('3') }
       if (this.fcmToken) {
         this.enabled = true
         setTimeout(() => this.publishSub(), 500)
@@ -4450,7 +4463,8 @@ const Push = {
         log('push: FCM включён (уведомления и при закрытом приложении)', 'ok')
         return true
       }
-      log('push: FCM-токен не получен — проверь, что приложение не в «спящем» режиме', 'warn')
+      log('push: FCM-токен не получен — нужен Google Play Services и интернет. ' +
+        'Строки «push register» / «push getToken» — в журнале событий', 'warn')
       return false
     } catch (e) {
       log('push (native): ' + e.message, 'warn')

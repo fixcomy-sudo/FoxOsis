@@ -20,21 +20,34 @@ if (!file || !fs.existsSync(file)) { console.error('Файл не найден: 
 const caption = (process.argv[3] || '').slice(0, 1024)
 const abs = path.resolve(file)
 
-const args = ['-sS', '-m', '180', '-w', '\n%{http_code}']
-if (cfg.proxy) args.push('-x', cfg.proxy)
-args.push('-F', 'chat_id=' + cfg.chat)
-if (caption) args.push('-F', 'caption=' + caption)
-args.push('-F', 'document=@' + abs)
-args.push('https://api.telegram.org/bot' + cfg.token + '/sendDocument')
+function buildArgs (proxy) {
+  const a = ['-sS', '-m', '180', '-w', '\n%{http_code}']
+  if (proxy) a.push('-x', proxy)
+  a.push('-F', 'chat_id=' + cfg.chat)
+  if (caption) a.push('-F', 'caption=' + caption)
+  a.push('-F', 'document=@' + abs)
+  a.push('https://api.telegram.org/bot' + cfg.token + '/sendDocument')
+  return a
+}
 
-const r = spawnSync('curl.exe', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
-const out = (r.stdout || '') + (r.stderr || '')
-const m = out.match(/(\d{3})\s*$/)
-const code = m ? m[1] : '000'
-const body = m ? out.slice(0, out.length - m[0].length) : out
-if (code === '200' && /"ok"\s*:\s*true/.test(body)) {
+function attempt (proxy) {
+  const r = spawnSync('curl.exe', buildArgs(proxy), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+  const out = (r.stdout || '') + (r.stderr || '')
+  const m = out.match(/(\d{3})\s*$/)
+  const code = m ? m[1] : '000'
+  const body = m ? out.slice(0, out.length - m[0].length) : out
+  return { code, body }
+}
+
+// 1) через прокси (если задан), 2) при сбое — напрямую
+let res = cfg.proxy ? attempt(cfg.proxy) : null
+if (!res || res.code !== '200') {
+  if (cfg.proxy) console.error('прокси не сработал (' + res.code + ') — пробую напрямую…')
+  res = attempt('')
+}
+if (res.code === '200' && /"ok"\s*:\s*true/.test(res.body)) {
   console.log('TG OK: ' + path.basename(abs) + ' (' + fs.statSync(abs).size + ' байт)')
   process.exit(0)
 }
-console.error('TG HTTP ' + code + ': ' + body.slice(0, 500))
+console.error('TG HTTP ' + res.code + ': ' + res.body.slice(0, 500))
 process.exit(1)
